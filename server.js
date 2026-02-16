@@ -222,7 +222,8 @@ async function handleAttended(userPhone, user) {
   const list = Array.isArray(sessions) ? sessions : [];
   const attended = list.filter(s => s.status === 'attended').length;
   const todayCount = list.filter(s => s.date === today && s.status === 'attended').length;
-  const remaining = config.paid_sessions - attended;
+  const totalSessions = (config.paid_sessions || 0) + (config.carry_forward || 0);
+  const remaining = totalSessions - attended;
 
   await sendMessage(userPhone,
     `✅ Session logged for ${today}!\n\n` +
@@ -279,9 +280,10 @@ async function handleWaitingResponse(userPhone, message, user) {
       return;
     }
 
-    const paid_sessions = parseInt(parts[0], 10);
+    const total_sessions = parseInt(parts[0], 10);
     const cost_per_session = parseInt(parts[1], 10);
     const carry_forward = parseInt(parts[2], 10);
+    const paid_sessions = Math.max(0, total_sessions - carry_forward);
     const month = new Date().toISOString().slice(0, 7);
 
     const { error: upsertErr } = await supabase
@@ -307,7 +309,7 @@ async function handleWaitingResponse(userPhone, message, user) {
       console.error('Supabase users clear after setup error:', clr2Err.message);
     }
 
-    await sendMessage(userPhone, `✅ Setup complete for ${month}. You can now type 'attended'.`);
+    await sendMessage(userPhone, `✅ Setup complete for ${month}.\nTotal sessions: ${total_sessions}\nCarry forward: ${carry_forward}\nPaid this month: ${paid_sessions}\nYou can now tap 'Attended'.`);
     return;
   }
 }
@@ -345,9 +347,10 @@ async function handleSummary(userPhone, user) {
   const list = Array.isArray(sessions) ? sessions : [];
   const attended = list.filter(s => s.status === 'attended').length;
   const cancelled = list.filter(s => s.status === 'cancelled').length;
-  const remaining = config.paid_sessions - attended;
-  const amountUsed = attended * config.cost_per_session;
-  const amountWasted = cancelled * config.cost_per_session;
+  const totalSessions = (config.paid_sessions || 0) + (config.carry_forward || 0);
+  const remaining = totalSessions - attended;
+  const amountUsed = Math.min(attended, config.paid_sessions) * config.cost_per_session;
+  const amountWasted = Math.min(Math.max(cancelled, 0), Math.max(config.paid_sessions - Math.min(attended, config.paid_sessions), 0)) * config.cost_per_session;
 
   const monthName = new Date(currentMonth + '-01').toLocaleDateString('en-US', { 
     month: 'long', 
@@ -356,10 +359,13 @@ async function handleSummary(userPhone, user) {
 
   const summary = 
     `📊 *${monthName.toUpperCase()} SUMMARY*\n\n` +
+    `📋 *PLAN*\n` +
+    `• Total sessions: ${totalSessions}\n` +
+    `• Carry forward: ${config.carry_forward || 0}\n` +
+    `• Paid this month: ${config.paid_sessions}\n\n` +
     `💰 *PAYMENT*\n` +
-    `• Paid: ${config.paid_sessions} sessions\n` +
     `• Cost: ₹${config.cost_per_session}/session\n` +
-    `• Total: ₹${config.paid_sessions * config.cost_per_session}\n\n` +
+    `• Total due: ₹${config.paid_sessions * config.cost_per_session}\n\n` +
     `📈 *ATTENDANCE*\n` +
     `• Attended: ${attended} (₹${amountUsed})\n` +
     `• Cancelled: ${cancelled} (₹${amountWasted})\n\n` +
@@ -442,13 +448,25 @@ async function sendMessage(to, text) {
 
 async function sendQuickMenu(to) {
   try {
+    const month = new Date().toISOString().slice(0,7);
+    let stats = '';
+    const { data: cfg } = await supabase.from('monthly_config').select('*').eq('user_phone', to).eq('month', month).single();
+    if (cfg) {
+      const { data: ss } = await supabase.from('sessions').select('*').eq('user_phone', to).eq('month', month);
+      const lst = Array.isArray(ss)?ss:[];
+      const att = lst.filter(s=>s.status==='attended').length;
+      const totalSessions = (cfg.paid_sessions || 0) + (cfg.carry_forward || 0);
+      stats = `${month} • ${att}/${totalSessions} attended`;
+    } else {
+      stats = `${month} • setup pending`;
+    }
     await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp',
       to,
       type: 'interactive',
       interactive: {
         type: 'button',
-        body: { text: 'Choose an action:' },
+        body: { text: `${stats}\nChoose an action:` },
         action: {
           buttons: [
             { type: 'reply', reply: { id: 'attended', title: 'Attended' } },
@@ -465,6 +483,38 @@ async function sendQuickMenu(to) {
     });
   } catch (error) {
     console.error('Error sending quick menu:', error.response?.data || error.message);
+  }
+}
+
+async function sendMoreMenu(to) {
+  try {
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: 'More options' },
+        body: { text: 'Open tools and settings' },
+        action: {
+          button: 'Open',
+          sections: [
+            { title: 'Tools', rows: [
+              { id: 'summary', title: 'Monthly summary' },
+              { id: 'holiday_range', title: 'Mark absence (range)' },
+              { id: 'holiday_next3', title: 'Mark next 3 days' },
+              { id: 'holiday_next7', title: 'Mark next 7 days' }
+            ]},
+            { title: 'Settings', rows: [
+              { id: 'setup_other', title: 'Update configuration' },
+              { id: 'reset', title: 'Reset month' }
+            ]}
+          ]
+        }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending more menu:', e.response?.data || e.message);
   }
 }
 
