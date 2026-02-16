@@ -22,7 +22,8 @@ function validateEnv() {
 
 validateEnv();
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_KEY;
+const supabase = createClient(process.env.SUPABASE_URL, supabaseKey);
 
 // WhatsApp configuration
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
@@ -89,11 +90,14 @@ async function handleMessage(userPhone, message) {
       return;
     }
     // Get user's current state
-    const { data: user } = await supabase
+    const { data: user, error: userErr } = await supabase
       .from('users')
       .select('*')
       .eq('phone', userPhone)
       .single();
+    if (userErr) {
+      console.error('Supabase users select error:', userErr.message);
+    }
 
     // New user - send welcome
     if (!user) {
@@ -139,10 +143,13 @@ async function handleMessage(userPhone, message) {
 
 // Create new user
 async function createUser(phone) {
-  await supabase.from('users').insert({
+  const { error } = await supabase.from('users').insert({
     phone: phone,
     created_at: new Date().toISOString()
   });
+  if (error) {
+    console.error('Supabase users insert error:', error.message);
+  }
 }
 
 // Handle attended session
@@ -151,12 +158,15 @@ async function handleAttended(userPhone, user) {
   
   // Get current month config
   const currentMonth = new Date().toISOString().slice(0, 7);
-  const { data: config } = await supabase
+  const { data: config, error: cfgErr } = await supabase
     .from('monthly_config')
     .select('*')
     .eq('user_phone', userPhone)
     .eq('month', currentMonth)
     .single();
+  if (cfgErr) {
+    console.error('Supabase monthly_config select error:', cfgErr.message);
+  }
 
   if (!config) {
     await sendMessage(userPhone, 
@@ -166,19 +176,25 @@ async function handleAttended(userPhone, user) {
   }
 
   // Log session
-  await supabase.from('sessions').insert({
+  const { error: insErr } = await supabase.from('sessions').insert({
     user_phone: userPhone,
     date: today,
     status: 'attended',
     month: currentMonth
   });
+  if (insErr) {
+    console.error('Supabase sessions insert error:', insErr.message);
+  }
 
   // Get stats
-  const { data: sessions } = await supabase
+  const { data: sessions, error: sesErr } = await supabase
     .from('sessions')
     .select('*')
     .eq('user_phone', userPhone)
     .eq('month', currentMonth);
+  if (sesErr) {
+    console.error('Supabase sessions select error:', sesErr.message);
+  }
 
   const list = Array.isArray(sessions) ? sessions : [];
   const attended = list.filter(s => s.status === 'attended').length;
@@ -196,10 +212,13 @@ async function handleAttended(userPhone, user) {
 // Handle missed session
 async function handleMissed(userPhone) {
   // Set waiting state
-  await supabase
+  const { error: missErr } = await supabase
     .from('users')
     .update({ waiting_for: 'cancellation_reason' })
     .eq('phone', userPhone);
+  if (missErr) {
+    console.error('Supabase users update error:', missErr.message);
+  }
 
   await sendMessage(userPhone, 'Why was the session cancelled?');
 }
@@ -210,18 +229,24 @@ async function handleWaitingResponse(userPhone, message, user) {
     const today = new Date().toISOString().split('T')[0];
     const currentMonth = new Date().toISOString().slice(0, 7);
 
-    await supabase.from('sessions').insert({
+    const { error: canErr } = await supabase.from('sessions').insert({
       user_phone: userPhone,
       date: today,
       status: 'cancelled',
       reason: message,
       month: currentMonth
     });
+    if (canErr) {
+      console.error('Supabase sessions insert cancel error:', canErr.message);
+    }
 
-    await supabase
+    const { error: clrErr } = await supabase
       .from('users')
       .update({ waiting_for: null })
       .eq('phone', userPhone);
+    if (clrErr) {
+      console.error('Supabase users clear waiting error:', clrErr.message);
+    }
 
     await sendMessage(userPhone,
       `✓ Cancelled session recorded for ${today}\n` +
@@ -244,7 +269,7 @@ async function handleWaitingResponse(userPhone, message, user) {
     const carry_forward = parseInt(parts[2], 10);
     const month = new Date().toISOString().slice(0, 7);
 
-    await supabase
+    const { error: upsertErr } = await supabase
       .from('monthly_config')
       .upsert([
         {
@@ -255,11 +280,17 @@ async function handleWaitingResponse(userPhone, message, user) {
           carry_forward
         }
       ], { onConflict: 'user_phone,month' });
+    if (upsertErr) {
+      console.error('Supabase monthly_config upsert error:', upsertErr.message);
+    }
 
-    await supabase
+    const { error: clr2Err } = await supabase
       .from('users')
       .update({ waiting_for: null })
       .eq('phone', userPhone);
+    if (clr2Err) {
+      console.error('Supabase users clear after setup error:', clr2Err.message);
+    }
 
     await sendMessage(userPhone, `✅ Setup complete for ${month}. You can now type 'attended'.`);
     return;
@@ -271,12 +302,15 @@ async function handleSummary(userPhone, user) {
   const currentMonth = new Date().toISOString().slice(0, 7);
   
   // Get config
-  const { data: config } = await supabase
+  const { data: config, error: cfgErr2 } = await supabase
     .from('monthly_config')
     .select('*')
     .eq('user_phone', userPhone)
     .eq('month', currentMonth)
     .single();
+  if (cfgErr2) {
+    console.error('Supabase monthly_config select error:', cfgErr2.message);
+  }
 
   if (!config) {
     await sendMessage(userPhone, 'No data for this month. Type "setup" to configure.');
@@ -284,11 +318,14 @@ async function handleSummary(userPhone, user) {
   }
 
   // Get sessions
-  const { data: sessions } = await supabase
+  const { data: sessions, error: sesErr2 } = await supabase
     .from('sessions')
     .select('*')
     .eq('user_phone', userPhone)
     .eq('month', currentMonth);
+  if (sesErr2) {
+    console.error('Supabase sessions select error:', sesErr2.message);
+  }
 
   const list = Array.isArray(sessions) ? sessions : [];
   const attended = list.filter(s => s.status === 'attended').length;
@@ -328,10 +365,13 @@ async function handleSetup(userPhone) {
     `(16 sessions, ₹800 each, 0 carry forward)`
   );
 
-  await supabase
+  const { error: setWaitErr } = await supabase
     .from('users')
     .update({ waiting_for: 'setup_config' })
     .eq('phone', userPhone);
+  if (setWaitErr) {
+    console.error('Supabase users set waiting error:', setWaitErr.message);
+  }
 }
 
 // Handle holiday
@@ -347,11 +387,14 @@ async function handleHoliday(userPhone, message) {
     date.setDate(date.getDate() + i);
     const dateStr = date.toISOString().split('T')[0];
 
-    await supabase.from('holidays').insert({
+    const { error: holErr } = await supabase.from('holidays').insert({
       user_phone: userPhone,
       date: dateStr,
       month: currentMonth
     });
+    if (holErr) {
+      console.error('Supabase holidays insert error:', holErr.message);
+    }
   }
 
   await sendMessage(userPhone, `✓ Marked ${days} day(s) as planned absence`);
