@@ -107,8 +107,8 @@ async function handleMessage(userPhone, message) {
     if (!user) {
       await createUser(userPhone);
       await sendMessage(userPhone, 
-        `👋 Welcome to Therapy Tracker!\n\n` +
-        `Let's set up your tracking. Type 'setup' to begin.`
+        `👋 Welcome to Therapy Tracker\n` +
+        `⚙️ Type 'setup' to begin`
       );
       await sendQuickMenu(userPhone);
       return;
@@ -181,18 +181,12 @@ async function handleMessage(userPhone, message) {
     } else if (message.includes('holiday') || message.includes('leave')) {
       await showHolidayPicker(userPhone);
     } else {
-      await sendMessage(userPhone,
-        `Quick commands:\n\n` +
-        `• 'attended' - log today's session\n` +
-        `• 'missed' - log cancelled session\n` +
-        `• 'summary' - monthly report\n` +
-        `• 'setup' - configure tracking`
-      );
+      await sendMessage(userPhone, `👇 Quick actions`);
       await sendQuickMenu(userPhone);
     }
   } catch (error) {
     console.error('Error handling message:', error);
-    await sendMessage(userPhone, 'Sorry, something went wrong. Please try again.');
+    await sendMessage(userPhone, '⚠️ Something went wrong. Please try again.');
   }
 }
 
@@ -309,8 +303,9 @@ async function handleWaitingResponse(userPhone, message, user) {
     }
 
     await sendMessage(userPhone,
-      `✓ Cancelled session recorded for ${today}\n` +
-      `Reason: ${message}`
+      `❌ Missed logged\n` +
+      `🗓 ${today}\n` +
+      `📝 ${message}`
     );
     return true;
   }
@@ -375,7 +370,7 @@ async function handleSummary(userPhone, user) {
   }
 
   if (!config) {
-    await sendMessage(userPhone, 'No data for this month. Type "setup" to configure.');
+    await sendMessage(userPhone, 'ℹ️ No config. Type "setup" to begin.');
     return;
   }
 
@@ -418,11 +413,9 @@ async function handleSummary(userPhone, user) {
 // Handle setup
 async function handleSetup(userPhone) {
   await sendMessage(userPhone,
-    `Let's set up your monthly tracking!\n\n` +
-    `Please reply with:\n` +
-    `[sessions] [cost] [carry_forward]\n\n` +
-    `Example: 16 800 0\n` +
-    `(16 sessions, ₹800 each, 0 carry forward)`
+    `⚙️ Setup\n` +
+    `Reply: [total] [cost] [carry]\n` +
+    `Ex: 16 800 2 (total includes carry)`
   );
   await sendSetupPresets(userPhone);
 
@@ -458,7 +451,7 @@ async function handleHoliday(userPhone, message) {
     }
   }
 
-  await sendMessage(userPhone, `✓ Marked ${days} day(s) as planned absence`);
+  await sendMessage(userPhone, `🏖️ Marked ${days} day(s) off`);
 }
 
 // Send WhatsApp message
