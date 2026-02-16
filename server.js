@@ -310,6 +310,31 @@ async function handleWaitingResponse(userPhone, message, user) {
     return true;
   }
 
+  if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('dup_attend:')) {
+    const yes = message === 'yes' || message === 'y' || message === 'confirm_yes';
+    const no = message === 'no' || message === 'n' || message === 'confirm_no';
+    const parts = user.waiting_for.split(':');
+    const date = parts[1];
+    const count = Math.max(1, parseInt(parts[2] || '1', 10));
+    if (yes) {
+      const month = date.slice(0,7);
+      const childId = await getOrCreateDefaultChild(userPhone);
+      await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'attended', month });
+      await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+      await sendMessage(userPhone, `✅ Added again\n🗓 ${date}`);
+      await sendQuickMenu(userPhone);
+      return true;
+    }
+    if (no) {
+      await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+      await sendMessage(userPhone, '❎ Skipped');
+      await sendQuickMenu(userPhone);
+      return true;
+    }
+    await sendYesNo(userPhone, 'Already logged today. Add again?');
+    return true;
+  }
+
   if (user.waiting_for === 'setup_config') {
     const parts = message.split(/\s+/).map(v => v.trim()).filter(Boolean);
     if (parts.length < 3 || parts.some(p => isNaN(parseInt(p, 10)))) {
@@ -620,10 +645,11 @@ async function confirmAttended(userPhone) {
     const m = u.waiting_for.match(/state:AWAITING_CONFIRMATION:(\d+)/);
     if (m) count = Math.max(1, parseInt(m[1], 10));
   }
+  const childId = await getOrCreateDefaultChild(userPhone);
   const { data: config } = await supabase
     .from('monthly_config')
     .select('*')
-    .eq('user_phone', userPhone)
+    .eq(childId ? 'child_id' : 'user_phone', childId ? childId : userPhone)
     .eq('month', currentMonth)
     .single();
   if (!config) {
@@ -631,12 +657,22 @@ async function confirmAttended(userPhone) {
     await sendMessage(userPhone, `No config set. Type 'setup' first.`);
     return;
   }
-  const batch = Array.from({ length: count }, () => ({ user_phone: userPhone, date: today, status: 'attended', month: currentMonth }));
-  await supabase.from('sessions').insert(batch);
+  const { data: dup } = await supabase
+    .from('sessions')
+    .select('id')
+    .eq(childId ? 'child_id' : 'user_phone', childId ? childId : userPhone)
+    .eq('date', today)
+    .eq('status', 'attended');
+  if (Array.isArray(dup) && dup.length) {
+    await supabase.from('users').update({ waiting_for: `dup_attend:${today}:${count}` }).eq('phone', userPhone);
+    await sendYesNo(userPhone, 'Already logged today. Add again?');
+    return;
+  }
+  await insertSessionsWithFallback({ userPhone, childId, date: today, count, status: 'attended', month: currentMonth });
   const { data: sessions } = await supabase
     .from('sessions')
     .select('*')
-    .eq('user_phone', userPhone)
+    .eq(childId ? 'child_id' : 'user_phone', childId ? childId : userPhone)
     .eq('month', currentMonth);
   const list = Array.isArray(sessions) ? sessions : [];
   const attended = list.filter(s => s.status === 'attended').length;
@@ -645,6 +681,42 @@ async function confirmAttended(userPhone) {
   await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
   await sendMessage(userPhone, `✅ Session logged\n🎯 ${remaining} left this month`);
   await sendQuickMenu(userPhone);
+}
+
+async function getOrCreateDefaultChild(userPhone) {
+  try {
+    const { data: link } = await supabase
+      .from('child_members')
+      .select('child_id')
+      .eq('member_phone', userPhone)
+      .limit(1);
+    if (Array.isArray(link) && link[0]?.child_id) return link[0].child_id;
+    const { data: childIns, error: childErr } = await supabase
+      .from('children')
+      .insert([{ name: 'Default', created_by: userPhone }])
+      .select('id');
+    if (childErr) return null;
+    const id = Array.isArray(childIns) ? childIns[0]?.id : null;
+    if (id) await supabase.from('child_members').insert([{ child_id: id, member_phone: userPhone, role: 'owner' }]);
+    return id || null;
+  } catch (_) { return null; }
+}
+
+async function insertSessionsWithFallback({ userPhone, childId, date, count, status, month }) {
+  const rows = Array.from({ length: count }, () => ({
+    user_phone: userPhone,
+    date,
+    status,
+    month,
+    child_id: childId,
+    logged_by: userPhone,
+    sessions_done: 1
+  }));
+  const { error } = await supabase.from('sessions').insert(rows);
+  if (error) {
+    const minimal = rows.map(r => ({ user_phone: r.user_phone, date: r.date, status: r.status, month: r.month }));
+    await supabase.from('sessions').insert(minimal);
+  }
 }
 
 // Health check endpoint
