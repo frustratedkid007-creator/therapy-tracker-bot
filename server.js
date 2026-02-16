@@ -383,6 +383,12 @@ app.get('/', (req, res) => {
   res.send('Therapy Tracker Bot is running! 🏥');
 });
 
+app.get('/privacy', (req, res) => {
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy Policy · Therapy Tracker Bot</title><style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.6;margin:40px;max-width:860px}h1{font-size:28px;margin-bottom:8px}h2{font-size:20px;margin-top:28px}code,pre{background:#f6f8fa;padding:2px 6px;border-radius:4px}</style></head><body><h1>Privacy Policy</h1><p>Therapy Tracker Bot helps users log therapy sessions and receive summaries via WhatsApp.</p><h2>Data We Process</h2><ul><li>WhatsApp phone number</li><li>Message content used for commands (e.g., attended, missed, summary, setup)</li><li>Session records: date, status, optional cancellation reason</li><li>Monthly configuration: paid sessions, cost, carry forward</li></ul><h2>Purpose</h2><p>We use the data to log sessions, generate summaries, and provide the service requested by the user.</p><h2>Storage & Retention</h2><p>Data is stored in Supabase in the region selected on project creation and retained until the user requests deletion or the account is deactivated.</p><h2>Sharing</h2><p>Data is not sold. It is shared only with our processors necessary to deliver the service (e.g., WhatsApp Cloud API by Meta and Supabase as our database provider).</p><h2>Security</h2><p>Access tokens and API keys are kept in server environment variables. Transport uses HTTPS.</p><h2>Your Rights</h2><p>Users can request access, correction, or deletion of their data by contacting us.</p><h2>Contact</h2><p>Email: privacy@therapy-tracker.example</p><h2>Updates</h2><p>We may update this policy. Changes will be posted on this page with the updated date.</p><p>Last updated: ${new Date().toISOString().slice(0,10)}</p></body></html>`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(html);
+});
+
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
