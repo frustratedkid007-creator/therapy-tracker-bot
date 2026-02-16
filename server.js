@@ -116,8 +116,8 @@ async function handleMessage(userPhone, message) {
 
     // Check if waiting for response
     if (user.waiting_for) {
-      await handleWaitingResponse(userPhone, message, user);
-      return;
+      const handled = await handleWaitingResponse(userPhone, message, user);
+      if (handled) return;
     }
 
     // Handle commands
@@ -133,7 +133,26 @@ async function handleMessage(userPhone, message) {
         await sendQuickMenu(userPhone);
         return;
       }
-    } else if (message.startsWith('missed_date:')) {
+    } else {
+      const { intent, count } = parseIntent(message);
+      if (intent === 'ATTENDED') {
+        const suffix = count && count > 1 ? `:${count}` : '';
+        await supabase.from('users').update({ waiting_for: `state:AWAITING_CONFIRMATION${suffix}` }).eq('phone', userPhone);
+        const c = count && count > 1 ? `${count} sessions` : 'session';
+        await sendYesNo(userPhone, `Log ${count && count > 1 ? count + ' ' : ''}${c} for today?`);
+        return;
+      }
+      if (intent === 'MISSED') {
+        await handleMissed(userPhone);
+        return;
+      }
+      if (intent === 'SUMMARY') {
+        await handleSummary(userPhone, user);
+        return;
+      }
+    }
+
+    if (message.startsWith('missed_date:')) {
       const date = message.split(':')[1];
       await supabase.from('users').update({ waiting_for: `missed_reason:${date}` }).eq('phone', userPhone);
       await sendMessage(userPhone, `Reason for missing on ${date}?`);
@@ -239,10 +258,8 @@ async function handleAttended(userPhone, user) {
   const remaining = totalSessions - attended;
 
   await sendMessage(userPhone,
-    `✅ Session logged for ${today}!\n\n` +
-    `Today: ${todayCount} session(s)\n` +
-    `This month: ${attended} sessions\n` +
-    `Remaining: ${remaining} sessions`
+    `✅ Session logged\n` +
+    `🎯 ${remaining} left this month`
   );
   await sendQuickMenu(userPhone);
 }
@@ -254,6 +271,20 @@ async function handleMissed(userPhone) {
 
 // Handle waiting responses
 async function handleWaitingResponse(userPhone, message, user) {
+  if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('state:AWAITING_CONFIRMATION')) {
+    const yes = message === 'yes' || message === 'y' || message === 'confirm_yes';
+    const no = message === 'no' || message === 'n' || message === 'confirm_no';
+    if (yes) { await confirmAttended(userPhone); return true; }
+    if (no) {
+      await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+      await sendMessage(userPhone, 'Okay, not logged.');
+      await sendQuickMenu(userPhone);
+      return true;
+    }
+    await sendYesNo(userPhone, 'Log session for today?');
+    return true;
+  }
+
   if (user.waiting_for === 'cancellation_reason') {
     const today = new Date().toISOString().split('T')[0];
     const currentMonth = new Date().toISOString().slice(0, 7);
@@ -281,7 +312,7 @@ async function handleWaitingResponse(userPhone, message, user) {
       `✓ Cancelled session recorded for ${today}\n` +
       `Reason: ${message}`
     );
-    return;
+    return true;
   }
 
   if (user.waiting_for === 'setup_config') {
@@ -290,7 +321,7 @@ async function handleWaitingResponse(userPhone, message, user) {
       await sendMessage(userPhone,
         `Please reply with: [sessions] [cost] [carry_forward]\nExample: 16 800 0`
       );
-      return;
+      return true;
     }
 
     const total_sessions = parseInt(parts[0], 10);
@@ -323,8 +354,9 @@ async function handleWaitingResponse(userPhone, message, user) {
     }
 
     await sendMessage(userPhone, `✅ Setup complete for ${month}.\nTotal sessions: ${total_sessions}\nCarry forward: ${carry_forward}\nPaid this month: ${paid_sessions}\nYou can now tap 'Attended'.`);
-    return;
+    return true;
   }
+  return false;
 }
 
 // Handle summary request
@@ -371,20 +403,11 @@ async function handleSummary(userPhone, user) {
   });
 
   const summary = 
-    `📊 *${monthName.toUpperCase()} SUMMARY*\n\n` +
-    `📋 *PLAN*\n` +
-    `• Total sessions: ${totalSessions}\n` +
-    `• Carry forward: ${config.carry_forward || 0}\n` +
-    `• Paid this month: ${config.paid_sessions}\n\n` +
-    `💰 *PAYMENT*\n` +
-    `• Cost: ₹${config.cost_per_session}/session\n` +
-    `• Total due: ₹${config.paid_sessions * config.cost_per_session}\n\n` +
-    `📈 *ATTENDANCE*\n` +
-    `• Attended: ${attended} (₹${amountUsed})\n` +
-    `• Cancelled: ${cancelled} (₹${amountWasted})\n\n` +
-    `✨ *SUMMARY*\n` +
-    `• Remaining: ${remaining} sessions\n` +
-    `• Carry forward: ${remaining} sessions`;
+    `📊 ${monthName} Summary\n\n` +
+    `✅ Done: ${attended}\n` +
+    `❌ Missed: ${cancelled}\n` +
+    `🎯 Remaining: ${remaining}\n\n` +
+    `💰 Due: ₹${config.paid_sessions * config.cost_per_session}`;
 
   await sendMessage(userPhone, summary);
   if (user?.waiting_for && user.waiting_for.startsWith && user.waiting_for.startsWith('state:')) {
@@ -598,6 +621,12 @@ async function sendYesNo(to, text) {
 async function confirmAttended(userPhone) {
   const today = new Date().toISOString().split('T')[0];
   const currentMonth = new Date().toISOString().slice(0, 7);
+  const { data: u } = await supabase.from('users').select('waiting_for').eq('phone', userPhone).single();
+  let count = 1;
+  if (u?.waiting_for && typeof u.waiting_for === 'string') {
+    const m = u.waiting_for.match(/state:AWAITING_CONFIRMATION:(\d+)/);
+    if (m) count = Math.max(1, parseInt(m[1], 10));
+  }
   const { data: config } = await supabase
     .from('monthly_config')
     .select('*')
@@ -609,7 +638,8 @@ async function confirmAttended(userPhone) {
     await sendMessage(userPhone, `No config set. Type 'setup' first.`);
     return;
   }
-  await supabase.from('sessions').insert({ user_phone: userPhone, date: today, status: 'attended', month: currentMonth });
+  const batch = Array.from({ length: count }, () => ({ user_phone: userPhone, date: today, status: 'attended', month: currentMonth }));
+  await supabase.from('sessions').insert(batch);
   const { data: sessions } = await supabase
     .from('sessions')
     .select('*')
@@ -620,7 +650,7 @@ async function confirmAttended(userPhone) {
   const totalSessions = (config.paid_sessions || 0) + (config.carry_forward || 0);
   const remaining = totalSessions - attended;
   await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
-  await sendMessage(userPhone, `✓ Logged for ${today}. Remaining: ${remaining}`);
+  await sendMessage(userPhone, `✅ Session logged\n🎯 ${remaining} left this month`);
   await sendQuickMenu(userPhone);
 }
 
@@ -654,6 +684,18 @@ app.get('/debug/env', (req, res) => {
     phoneNumberId: mask(process.env.PHONE_NUMBER_ID || ''),
   });
 });
+
+function parseIntent(text) {
+  const t = (text || '').toLowerCase();
+  if (/(\bsummary\b|\breport\b|\bstatus\b)/.test(t)) return { intent: 'SUMMARY' };
+  if (/(\bmissed\b|\bcancelled\b|\bnot\s+attended\b|\bno\s*show\b)/.test(t)) return { intent: 'MISSED' };
+  if (/(\battended\b|\bdone\b|\bcompleted\b|\d+\s*(sessions?|done))/i.test(t)) {
+    const m = t.match(/(\d+)\s*(?:sessions?|done|attended|completed)?/);
+    const c = m ? parseInt(m[1], 10) : undefined;
+    return { intent: 'ATTENDED', count: c };
+  }
+  return { intent: null };
+}
 
 // Start server
 const PORT = process.env.PORT || 3000;
