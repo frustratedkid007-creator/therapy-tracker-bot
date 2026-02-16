@@ -121,7 +121,24 @@ async function handleMessage(userPhone, message) {
     }
 
     // Handle commands
-    if (message.includes('attended') || message === 'done' || message === 'ok' || message === '✓') {
+    if (message.startsWith('missed_date:')) {
+      const date = message.split(':')[1];
+      await supabase.from('users').update({ waiting_for: `missed_reason:${date}` }).eq('phone', userPhone);
+      await sendMessage(userPhone, `Reason for missing on ${date}?`);
+    } else if (message === 'holiday_today') {
+      await markHolidayRange(userPhone, 1);
+    } else if (message === 'holiday_next3') {
+      await markHolidayRange(userPhone, 3);
+    } else if (message === 'holiday_next7') {
+      await markHolidayRange(userPhone, 7);
+    } else if (message === 'holiday_range') {
+      await supabase.from('users').update({ waiting_for: 'holiday_range' }).eq('phone', userPhone);
+      await sendMessage(userPhone, 'Type range as YYYY-MM-DD..YYYY-MM-DD');
+    } else if (message === 'setup_other') {
+      await handleSetup(userPhone);
+    } else if (message.includes('reset') || message === 'confirm_reset' || message === 'cancel_reset') {
+      await handleReset(userPhone, message);
+    } else if (message.includes('attended') || message === 'done' || message === 'ok' || message === '✓') {
       await handleAttended(userPhone, user);
     } else if (message.includes('missed') || message.includes('cancelled')) {
       await handleMissed(userPhone);
@@ -130,7 +147,7 @@ async function handleMessage(userPhone, message) {
     } else if (message.includes('setup')) {
       await handleSetup(userPhone);
     } else if (message.includes('holiday') || message.includes('leave')) {
-      await handleHoliday(userPhone, message);
+      await showHolidayPicker(userPhone);
     } else {
       await sendMessage(userPhone,
         `Quick commands:\n\n` +
@@ -218,16 +235,7 @@ async function handleAttended(userPhone, user) {
 
 // Handle missed session
 async function handleMissed(userPhone) {
-  // Set waiting state
-  const { error: missErr } = await supabase
-    .from('users')
-    .update({ waiting_for: 'cancellation_reason' })
-    .eq('phone', userPhone);
-  if (missErr) {
-    console.error('Supabase users update error:', missErr.message);
-  }
-
-  await sendMessage(userPhone, 'Why was the session cancelled?');
+  await sendMissedDatePicker(userPhone);
 }
 
 // Handle waiting responses
