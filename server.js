@@ -435,6 +435,26 @@ app.get('/privacy', (req, res) => {
   res.status(200).send(html);
 });
 
+app.get('/health/db', async (req, res) => {
+  try {
+    const { error } = await supabase.from('users').select('id').limit(1);
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+app.get('/debug/env', (req, res) => {
+  const mask = (v) => (v && v.length > 6 ? v.slice(0, 3) + '***' + v.slice(-3) : !!v);
+  res.json({
+    supabaseUrlSet: !!process.env.SUPABASE_URL,
+    supabaseServiceRoleSet: !!process.env.SUPABASE_SERVICE_ROLE,
+    supabaseAnonSet: !!process.env.SUPABASE_KEY,
+    phoneNumberId: mask(process.env.PHONE_NUMBER_ID || ''),
+  });
+});
+
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
