@@ -57,7 +57,11 @@ app.post('/webhook', async (req, res) => {
       if (value?.messages?.[0]) {
         const message = value.messages[0];
         const from = message.from;
-        const messageBody = (message.text?.body || '').toLowerCase().trim();
+        let messageBody = (message.text?.body || '').toLowerCase().trim();
+        if (message.type === 'interactive') {
+          const bid = message.interactive?.button_reply?.id || message.interactive?.list_reply?.id || '';
+          if (bid) messageBody = bid.toLowerCase();
+        }
         
         console.log(`Message from ${from}: ${messageBody}`);
         
@@ -106,6 +110,7 @@ async function handleMessage(userPhone, message) {
         `👋 Welcome to Therapy Tracker!\n\n` +
         `Let's set up your tracking. Type 'setup' to begin.`
       );
+      await sendQuickMenu(userPhone);
       return;
     }
 
@@ -134,6 +139,7 @@ async function handleMessage(userPhone, message) {
         `• 'summary' - monthly report\n` +
         `• 'setup' - configure tracking`
       );
+      await sendQuickMenu(userPhone);
     }
   } catch (error) {
     console.error('Error handling message:', error);
@@ -207,6 +213,7 @@ async function handleAttended(userPhone, user) {
     `This month: ${attended} sessions\n` +
     `Remaining: ${remaining} sessions`
   );
+  await sendQuickMenu(userPhone);
 }
 
 // Handle missed session
@@ -364,6 +371,7 @@ async function handleSetup(userPhone) {
     `Example: 16 800 0\n` +
     `(16 sessions, ₹800 each, 0 carry forward)`
   );
+  await sendSetupPresets(userPhone);
 
   const { error: setWaitErr } = await supabase
     .from('users')
@@ -421,6 +429,75 @@ async function sendMessage(to, text) {
     console.log(`Message sent to ${to}`);
   } catch (error) {
     console.error('Error sending message:', error.response?.data || error.message);
+  }
+}
+
+async function sendQuickMenu(to) {
+  try {
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: 'Choose an action:' },
+        action: {
+          buttons: [
+            { type: 'reply', reply: { id: 'attended', title: 'Attended' } },
+            { type: 'reply', reply: { id: 'missed', title: 'Missed' } },
+            { type: 'reply', reply: { id: 'summary', title: 'Summary' } }
+          ]
+        }
+      }
+    }, {
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+  } catch (error) {
+    console.error('Error sending quick menu:', error.response?.data || error.message);
+  }
+}
+
+async function sendSetupPresets(to) {
+  try {
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: 'Setup Presets' },
+        body: { text: 'Pick a preset or choose Other to type your own.' },
+        action: {
+          button: 'Choose preset',
+          sections: [
+            {
+              title: 'Common Plans',
+              rows: [
+                { id: '16 800 0', title: '16 sessions • ₹800 • 0 CF' },
+                { id: '12 1000 0', title: '12 sessions • ₹1000 • 0 CF' },
+                { id: '8 800 0', title: '8 sessions • ₹800 • 0 CF' }
+              ]
+            },
+            {
+              title: 'Custom',
+              rows: [
+                { id: 'setup_other', title: 'Other (I will type it)' }
+              ]
+            }
+          ]
+        }
+      }
+    }, {
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+  } catch (error) {
+    console.error('Error sending setup presets:', error.response?.data || error.message);
   }
 }
 
