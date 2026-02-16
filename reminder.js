@@ -1,4 +1,5 @@
 const axios = require('axios')
+const cron = require('node-cron')
 const { createClient } = require('@supabase/supabase-js')
 require('dotenv').config()
 
@@ -37,37 +38,71 @@ async function hasLogTodayByChild(childId, userPhone, today) {
   return false
 }
 
-async function main() {
+async function runOnce() {
   const { today, hour } = nowParts()
   if (hour < REMINDER_HOUR) return
+  // Skip weekends: 0=Sunday, 6=Saturday (Kolkata)
+  const wd = new Date().toLocaleString('en-US', { timeZone: TZ, weekday: 'short' })
+  if (wd.startsWith('Sat') || wd.startsWith('Sun')) return
 
-  const { data: users, error } = await supabase.from('users').select('*')
+  // Build parent map
+  const { data: members } = await supabase.from('child_members').select('child_id, member_phone, role')
+  const parentsByChild = new Map()
+  for (const m of members || []) {
+    const role = (m.role || 'member').toLowerCase()
+    if (role === 'therapist') continue
+    if (!parentsByChild.has(m.child_id)) parentsByChild.set(m.child_id, new Set())
+    parentsByChild.get(m.child_id).add(m.member_phone)
+  }
+
+  // Pull user settings into a map
+  const { data: users, error } = await supabase.from('users').select('phone, reminders_enabled, last_reminder_sent')
   if (error) throw new Error(error.message)
+  const uMap = new Map((users || []).map(u => [u.phone, u]))
 
-  for (const u of users || []) {
-    if (u.reminders_enabled === false) continue
-    if (u.last_reminder_sent && String(u.last_reminder_sent) === today) continue
-    const { data: links } = await supabase.from('child_members').select('child_id').eq('member_phone', u.phone)
-    let needReminder = true
-    if (Array.isArray(links) && links.length) {
-      for (const l of links) {
-        const exists = await hasLogTodayByChild(l.child_id, u.phone, today)
-        if (exists) { needReminder = false; break }
-      }
-    } else {
+  // If no children configured, fall back to per-user check
+  if (!parentsByChild.size) {
+    for (const u of users || []) {
+      if (u.reminders_enabled === false) continue
+      if (u.last_reminder_sent && String(u.last_reminder_sent) === today) continue
       const exists = await hasLogTodayByChild(null, u.phone, today)
-      if (exists) needReminder = false
+      if (exists) continue
+      try {
+        await sendMessage(u.phone, `⏰ Reminder\nNo session logged today yet.\nReply: done / missed / holiday`)
+        await supabase.from('users').update({ last_reminder_sent: today }).eq('phone', u.phone)
+        console.log('Reminder sent to', u.phone)
+      } catch (e) {
+        console.error('Reminder send failed for', u.phone, e.response?.data || e.message)
+      }
     }
-    if (!needReminder) continue
-    try {
-      await sendMessage(u.phone, `⏰ Reminder\nNo session logged today yet.\nReply: done / missed / holiday`)
-      await supabase.from('users').update({ last_reminder_sent: today }).eq('phone', u.phone)
-      console.log('Reminder sent to', u.phone)
-    } catch (e) {
-      console.error('Reminder send failed for', u.phone, e.response?.data || e.message)
+    return
+  }
+
+  // Iterate per child and notify only parents
+  for (const [childId, phonesSet] of parentsByChild.entries()) {
+    const exists = await hasLogTodayByChild(childId, null, today)
+    if (exists) continue
+    for (const phone of phonesSet) {
+      const u = uMap.get(phone)
+      if (!u || u.reminders_enabled === false) continue
+      if (u.last_reminder_sent && String(u.last_reminder_sent) === today) continue
+      try {
+        await sendMessage(phone, `⏰ Reminder\nNo session logged today yet.\nReply: done / missed / holiday`)
+        await supabase.from('users').update({ last_reminder_sent: today }).eq('phone', phone)
+        console.log('Reminder sent to', phone)
+      } catch (e) {
+        console.error('Reminder send failed for', phone, e.response?.data || e.message)
+      }
     }
   }
 }
 
-main().catch(e => { console.error(e); process.exit(1) })
-
+if (process.env.RUN_ONCE === '1') {
+  runOnce().catch(e => { console.error(e); process.exit(1) })
+} else {
+  const expr = process.env.REMINDER_CRON || '0 0 13 * * 1-5' // 13:00 Mon–Fri
+  cron.schedule(expr, () => {
+    runOnce().catch(e => console.error('reminder run error', e.message))
+  }, { timezone: TZ })
+  console.log(`Reminder scheduler started: ${expr} tz=${TZ}`)
+}
