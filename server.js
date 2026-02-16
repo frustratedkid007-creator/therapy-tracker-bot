@@ -62,6 +62,9 @@ app.post('/webhook', async (req, res) => {
         
         // Process the message
         await handleMessage(from, messageBody);
+      } else {
+        const hasStatuses = Array.isArray(value?.statuses) && value.statuses.length > 0;
+        console.log('Webhook event received but no messages array; statuses:', hasStatuses ? JSON.stringify(value.statuses) : 'none');
       }
     }
 
