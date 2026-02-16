@@ -167,6 +167,16 @@ async function handleMessage(userPhone, message) {
       await sendMessage(userPhone, 'Type range as YYYY-MM-DD..YYYY-MM-DD');
     } else if (message === 'setup_other') {
       await handleSetup(userPhone);
+    } else if (message === 'setup_fresh') {
+      await sendSetupPresets(userPhone);
+      const { error: setWaitErr } = await supabase
+        .from('users')
+        .update({ waiting_for: 'setup_config' })
+        .eq('phone', userPhone);
+      if (setWaitErr) console.error('Supabase users set waiting error:', setWaitErr.message);
+    } else if (message === 'setup_mid') {
+      await supabase.from('users').update({ waiting_for: 'setup_mid_config' }).eq('phone', userPhone);
+      await sendMessage(userPhone, `🧮 Mid‑month setup\nReply: [total] [cost] [carry] [used]\nEx: 16 800 2 6`);
     } else if (message.includes('reset') || message === 'confirm_reset' || message === 'cancel_reset') {
       await handleReset(userPhone, message);
     } else if (message.includes('attended') || message === 'done' || message === 'ok' || message === '✓') {
@@ -376,6 +386,36 @@ async function handleWaitingResponse(userPhone, message, user) {
     await sendMessage(userPhone, `✅ Setup complete for ${month}.\nTotal sessions: ${total_sessions}\nCarry forward: ${carry_forward}\nPaid this month: ${paid_sessions}\nYou can now tap 'Attended'.`);
     return true;
   }
+
+  if (user.waiting_for === 'setup_mid_config') {
+    const parts = message.split(/\s+/).map(v => v.trim()).filter(Boolean);
+    if (parts.length < 4 || parts.some(p => isNaN(parseInt(p, 10)))) {
+      await sendMessage(userPhone, `🧮 Mid‑month setup\nReply: [total] [cost] [carry] [used]\nEx: 16 800 2 6`);
+      return true;
+    }
+    const total_sessions = parseInt(parts[0], 10);
+    const cost_per_session = parseInt(parts[1], 10);
+    const carry_forward = parseInt(parts[2], 10);
+    const used = Math.max(0, parseInt(parts[3], 10));
+    const paid_sessions = Math.max(0, total_sessions - carry_forward);
+    const month = new Date().toISOString().slice(0, 7);
+
+    const { error: upErr } = await supabase.from('monthly_config').upsert([
+      { user_phone: userPhone, month, paid_sessions, cost_per_session, carry_forward }
+    ], { onConflict: 'user_phone,month' });
+    if (upErr) console.error('monthly_config upsert mid error:', upErr.message);
+
+    // Bulk backfill attended across earlier days this month
+    if (used > 0) {
+      await bulkBackfillAttended(userPhone, used, month);
+    }
+
+    await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+    const remaining = total_sessions - used;
+    await sendMessage(userPhone, `✅ Setup complete\n🧮 Total: ${total_sessions}\n✅ Done: ${used}\n🎯 Remaining: ${remaining}`);
+    await sendQuickMenu(userPhone);
+    return true;
+  }
   return false;
 }
 
@@ -437,12 +477,8 @@ async function handleSummary(userPhone, user) {
 
 // Handle setup
 async function handleSetup(userPhone) {
-  await sendMessage(userPhone,
-    `⚙️ Setup\n` +
-    `Reply: [total] [cost] [carry]\n` +
-    `Ex: 16 800 2 (total includes carry)`
-  );
-  await sendSetupPresets(userPhone);
+  await sendMessage(userPhone, `⚙️ Setup\nChoose a mode:`);
+  await sendSetupMode(userPhone);
 
   const { error: setWaitErr } = await supabase
     .from('users')
@@ -613,6 +649,49 @@ async function sendSetupPresets(to) {
     });
   } catch (error) {
     console.error('Error sending setup presets:', error.response?.data || error.message);
+  }
+}
+
+async function sendSetupMode(to) {
+  try {
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: 'Choose how to set up' },
+        action: { buttons: [
+          { type: 'reply', reply: { id: 'setup_fresh', title: 'Start Fresh' } },
+          { type: 'reply', reply: { id: 'setup_mid', title: 'Start Mid‑Month' } }
+        ] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending setup mode:', e.response?.data || e.message);
+  }
+}
+
+async function bulkBackfillAttended(userPhone, used, month) {
+  try {
+    const year = parseInt(month.split('-')[0], 10);
+    const mon = parseInt(month.split('-')[1], 10);
+    const today = new Date();
+    const first = new Date(Date.UTC(year, mon - 1, 1));
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    const maxDays = Math.max(0, Math.min(used, Math.max(0, Math.floor((yesterday - first) / 86400000) + 1)));
+    if (maxDays <= 0) return;
+    const childId = await getOrCreateDefaultChild(userPhone);
+    const rows = [];
+    for (let i = 0; i < maxDays; i++) {
+      const d = new Date(first); d.setUTCDate(d.getUTCDate() + i);
+      const date = d.toISOString().slice(0,10);
+      rows.push({ user_phone: userPhone, child_id: childId, logged_by: userPhone, sessions_done: 1, date, status: 'attended', month });
+    }
+    await supabase.from('sessions').insert(rows);
+  } catch (e) {
+    console.error('bulkBackfillAttended error:', e.message);
   }
 }
 
