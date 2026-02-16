@@ -750,6 +750,18 @@ app.get('/debug/env', (req, res) => {
   });
 });
 
+app.post('/internal/reminders', async (req, res) => {
+  try {
+    const token = req.headers['x-reminder-token'] || req.query.token;
+    if (!token || token !== process.env.REMINDER_TOKEN) return res.sendStatus(401);
+    const { runOnce } = require('./reminder');
+    await runOnce();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
 function parseIntent(text) {
   const t = (text || '').toLowerCase();
   if (/(\bsummary\b|\breport\b|\bstatus\b)/.test(t)) return { intent: 'SUMMARY' };

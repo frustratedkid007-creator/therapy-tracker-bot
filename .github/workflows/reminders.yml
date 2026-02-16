@@ -1,0 +1,16 @@
+name: Reminders
+
+on:
+  schedule:
+    # 13:00 IST = 07:30 UTC (adjust as needed); here set to 07:30 UTC Mon–Fri
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger reminder endpoint
+        run: |
+          curl -X POST "${{ secrets.REMINDER_URL }}" \
+            -H "x-reminder-token: ${{ secrets.REMINDER_TOKEN }}"

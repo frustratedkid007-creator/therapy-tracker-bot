@@ -97,12 +97,16 @@ async function runOnce() {
   }
 }
 
-if (process.env.RUN_ONCE === '1') {
-  runOnce().catch(e => { console.error(e); process.exit(1) })
+if (require.main === module) {
+  if (process.env.RUN_ONCE === '1') {
+    runOnce().catch(e => { console.error(e); process.exit(1) })
+  } else {
+    const expr = process.env.REMINDER_CRON || '0 0 13 * * 1-5' // 13:00 Mon–Fri
+    cron.schedule(expr, () => {
+      runOnce().catch(e => console.error('reminder run error', e.message))
+    }, { timezone: TZ })
+    console.log(`Reminder scheduler started: ${expr} tz=${TZ}`)
+  }
 } else {
-  const expr = process.env.REMINDER_CRON || '0 0 13 * * 1-5' // 13:00 Mon–Fri
-  cron.schedule(expr, () => {
-    runOnce().catch(e => console.error('reminder run error', e.message))
-  }, { timezone: TZ })
-  console.log(`Reminder scheduler started: ${expr} tz=${TZ}`)
+  module.exports = { runOnce }
 }
