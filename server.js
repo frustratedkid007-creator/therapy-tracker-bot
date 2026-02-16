@@ -121,7 +121,19 @@ async function handleMessage(userPhone, message) {
     }
 
     // Handle commands
-    if (message.startsWith('missed_date:')) {
+    if (message === 'yes' || message === 'y' || message === 'confirm_yes') {
+      if (user.waiting_for === 'state:AWAITING_CONFIRMATION') {
+        await confirmAttended(userPhone);
+        return;
+      }
+    } else if (message === 'no' || message === 'n' || message === 'confirm_no') {
+      if (user.waiting_for === 'state:AWAITING_CONFIRMATION') {
+        await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+        await sendMessage(userPhone, 'Okay, not logged.');
+        await sendQuickMenu(userPhone);
+        return;
+      }
+    } else if (message.startsWith('missed_date:')) {
       const date = message.split(':')[1];
       await supabase.from('users').update({ waiting_for: `missed_reason:${date}` }).eq('phone', userPhone);
       await sendMessage(userPhone, `Reason for missing on ${date}?`);
@@ -139,7 +151,8 @@ async function handleMessage(userPhone, message) {
     } else if (message.includes('reset') || message === 'confirm_reset' || message === 'cancel_reset') {
       await handleReset(userPhone, message);
     } else if (message.includes('attended') || message === 'done' || message === 'ok' || message === '✓') {
-      await handleAttended(userPhone, user);
+      await supabase.from('users').update({ waiting_for: 'state:AWAITING_CONFIRMATION' }).eq('phone', userPhone);
+      await sendYesNo(userPhone, 'Log session for today?');
     } else if (message.includes('missed') || message.includes('cancelled')) {
       await handleMissed(userPhone);
     } else if (message.includes('summary') || message.includes('report')) {
@@ -374,6 +387,9 @@ async function handleSummary(userPhone, user) {
     `• Carry forward: ${remaining} sessions`;
 
   await sendMessage(userPhone, summary);
+  if (user?.waiting_for && user.waiting_for.startsWith && user.waiting_for.startsWith('state:')) {
+    await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+  }
 }
 
 // Handle setup
@@ -557,6 +573,55 @@ async function sendSetupPresets(to) {
   } catch (error) {
     console.error('Error sending setup presets:', error.response?.data || error.message);
   }
+}
+
+async function sendYesNo(to, text) {
+  try {
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text },
+        action: { buttons: [
+          { type: 'reply', reply: { id: 'confirm_yes', title: 'Yes' } },
+          { type: 'reply', reply: { id: 'confirm_no', title: 'No' } }
+        ] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending yes/no:', e.response?.data || e.message);
+  }
+}
+
+async function confirmAttended(userPhone) {
+  const today = new Date().toISOString().split('T')[0];
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  const { data: config } = await supabase
+    .from('monthly_config')
+    .select('*')
+    .eq('user_phone', userPhone)
+    .eq('month', currentMonth)
+    .single();
+  if (!config) {
+    await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+    await sendMessage(userPhone, `No config set. Type 'setup' first.`);
+    return;
+  }
+  await supabase.from('sessions').insert({ user_phone: userPhone, date: today, status: 'attended', month: currentMonth });
+  const { data: sessions } = await supabase
+    .from('sessions')
+    .select('*')
+    .eq('user_phone', userPhone)
+    .eq('month', currentMonth);
+  const list = Array.isArray(sessions) ? sessions : [];
+  const attended = list.filter(s => s.status === 'attended').length;
+  const totalSessions = (config.paid_sessions || 0) + (config.carry_forward || 0);
+  const remaining = totalSessions - attended;
+  await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+  await sendMessage(userPhone, `✓ Logged for ${today}. Remaining: ${remaining}`);
+  await sendQuickMenu(userPhone);
 }
 
 // Health check endpoint
