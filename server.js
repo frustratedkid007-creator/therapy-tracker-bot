@@ -85,11 +85,12 @@ async function handleMessage(userPhone, message) {
   try {
     if (!message) {
       await sendMessage(userPhone,
-        `Quick commands:\n\n` +
-        `• 'attended' - log today's session\n` +
-        `• 'missed' - log cancelled session\n` +
-        `• 'summary' - monthly report\n` +
-        `• 'setup' - configure tracking`
+        `👋 *Therapy Tracker*\n\n` +
+        `Here's what you can do:\n\n` +
+        `✅ *attended* — log today's session\n` +
+        `❌ *missed* — log a missed session\n` +
+        `📊 *summary* — monthly report\n` +
+        `⚙️ *setup* — configure tracking`
       );
       return;
     }
@@ -107,8 +108,13 @@ async function handleMessage(userPhone, message) {
     if (!user) {
       await createUser(userPhone);
       await sendMessage(userPhone, 
-        `👋 Welcome to Therapy Tracker\n` +
-        `⚙️ Type 'setup' to begin`
+        `👋 *Welcome to Therapy Tracker!*\n\n` +
+        `Track your child's therapy sessions easily right here on WhatsApp.\n\n` +
+        `✅ Log attended sessions\n` +
+        `❌ Track missed sessions with reason\n` +
+        `📊 Get monthly summaries\n` +
+        `💰 Track costs & carry forward\n\n` +
+        `Let's get started! Tap *Setup* below ⬇️`
       );
       await sendQuickMenu(userPhone);
       return;
@@ -129,7 +135,7 @@ async function handleMessage(userPhone, message) {
     } else if (message === 'no' || message === 'n' || message === 'confirm_no') {
       if (user.waiting_for === 'state:AWAITING_CONFIRMATION') {
         await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
-        await sendMessage(userPhone, 'Okay, not logged.');
+        await sendMessage(userPhone, '👍 No problem, session not logged.');
         await sendQuickMenu(userPhone);
         return;
       }
@@ -155,7 +161,7 @@ async function handleMessage(userPhone, message) {
     if (message.startsWith('missed_date:')) {
       const date = message.split(':')[1];
       await supabase.from('users').update({ waiting_for: `missed_reason:${date}` }).eq('phone', userPhone);
-      await sendMessage(userPhone, `Reason for missing on ${date}?`);
+      await sendMessage(userPhone, `📝 *Why was the session missed?*\n\n🗓 Date: ${date}\n\nPlease type a brief reason:\n_e.g. "child was sick", "therapist unavailable"_`);
     } else if (message === 'holiday_today') {
       await markHolidayRange(userPhone, 1);
     } else if (message === 'holiday_next3') {
@@ -164,7 +170,7 @@ async function handleMessage(userPhone, message) {
       await markHolidayRange(userPhone, 7);
     } else if (message === 'holiday_range') {
       await supabase.from('users').update({ waiting_for: 'holiday_range' }).eq('phone', userPhone);
-      await sendMessage(userPhone, 'Type range as YYYY-MM-DD..YYYY-MM-DD');
+      await sendMessage(userPhone, `📅 *Mark Holiday Range*\n\nType the date range in this format:\n*YYYY-MM-DD..YYYY-MM-DD*\n\nExample: \`2026-02-20..2026-02-25\``);
     } else if (message === 'setup_other') {
       await handleSetup(userPhone);
     } else if (message === 'setup_fresh') {
@@ -176,12 +182,12 @@ async function handleMessage(userPhone, message) {
       if (setWaitErr) console.error('Supabase users set waiting error:', setWaitErr.message);
     } else if (message === 'setup_mid') {
       await supabase.from('users').update({ waiting_for: 'setup_mid_config' }).eq('phone', userPhone);
-      await sendMessage(userPhone, `🧮 Mid‑month setup\nReply: [total] [cost] [carry] [used]\nEx: 16 800 2 6`);
+      await sendMessage(userPhone, `🧮 *Mid-month Setup*\n\nReply with 4 numbers:\n*[total] [cost] [carry] [used]*\n\nExample: \`16 800 2 6\`\n_(16 total • ₹800 each • 2 carried • 6 already done)_`);
     } else if (message.includes('reset') || message === 'confirm_reset' || message === 'cancel_reset') {
       await handleReset(userPhone, message);
     } else if (message.includes('attended') || message === 'done' || message === 'ok' || message === '✓') {
       await supabase.from('users').update({ waiting_for: 'state:AWAITING_CONFIRMATION' }).eq('phone', userPhone);
-      await sendYesNo(userPhone, 'Log session for today?');
+      await sendYesNo(userPhone, `✅ *Log today's session?*\n\nTap Yes to record an attended session for today.`);
     } else if (message.includes('missed') || message.includes('cancelled')) {
       await handleMissed(userPhone);
     } else if (message.includes('summary') || message.includes('report')) {
@@ -229,7 +235,7 @@ async function handleAttended(userPhone, user) {
 
   if (!config) {
     await sendMessage(userPhone, 
-      `⚠️ Please run setup first!\n\nType 'setup' to configure your monthly sessions.`
+      `⚙️ *Setup required!*\n\nNo plan found for this month.\nType *setup* to configure your sessions first.`
     );
     return;
   }
@@ -289,6 +295,29 @@ async function handleWaitingResponse(userPhone, message, user) {
     return true;
   }
 
+  if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('missed_reason:')) {
+    const date = user.waiting_for.split(':')[1];
+    const month = date.slice(0,7);
+    const childId = await getOrCreateDefaultChild(userPhone);
+    const { error: insErr } = await supabase.from('sessions').insert({
+      user_phone: userPhone,
+      child_id: childId,
+      logged_by: userPhone,
+      sessions_done: 1,
+      date,
+      status: 'cancelled',
+      reason: message,
+      month
+    });
+    if (insErr) {
+      console.error('Supabase sessions insert cancel error:', insErr.message);
+    }
+    await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+    await sendMessage(userPhone, `❌ *Missed session recorded*\n\n🗓 Date: ${date}\n📝 Reason: ${message}`);
+    await sendQuickMenu(userPhone);
+    return true;
+  }
+
   if (user.waiting_for === 'cancellation_reason') {
     const today = new Date().toISOString().split('T')[0];
     const currentMonth = new Date().toISOString().slice(0, 7);
@@ -313,9 +342,9 @@ async function handleWaitingResponse(userPhone, message, user) {
     }
 
     await sendMessage(userPhone,
-      `❌ Missed logged\n` +
-      `🗓 ${today}\n` +
-      `📝 ${message}`
+      `❌ *Missed session recorded*\n\n` +
+      `🗓 Date: ${today}\n` +
+      `📝 Reason: ${message}`
     );
     return true;
   }
@@ -331,17 +360,17 @@ async function handleWaitingResponse(userPhone, message, user) {
       const childId = await getOrCreateDefaultChild(userPhone);
       await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'attended', month });
       await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
-      await sendMessage(userPhone, `✅ Added again\n🗓 ${date}`);
+      await sendMessage(userPhone, `✅ *Extra session added!*\n\n🗓 Date: ${date}`);
       await sendQuickMenu(userPhone);
       return true;
     }
     if (no) {
       await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
-      await sendMessage(userPhone, '❎ Skipped');
+      await sendMessage(userPhone, '👍 Got it, no extra session added.');
       await sendQuickMenu(userPhone);
       return true;
     }
-    await sendYesNo(userPhone, 'Already logged today. Add again?');
+    await sendYesNo(userPhone, `⚠️ *Already logged today!*\n\nWant to add another session?`);
     return true;
   }
 
@@ -349,7 +378,7 @@ async function handleWaitingResponse(userPhone, message, user) {
     const parts = message.split(/\s+/).map(v => v.trim()).filter(Boolean);
     if (parts.length < 3 || parts.some(p => isNaN(parseInt(p, 10)))) {
       await sendMessage(userPhone,
-        `Please reply with: [sessions] [cost] [carry_forward]\nExample: 16 800 0`
+        `⚠️ *Invalid format*\n\nPlease reply with:\n*[sessions] [cost] [carry_forward]*\n\nExample: \`16 800 0\`\n_(16 sessions • ₹800 each • 0 carry forward)_`
       );
       return true;
     }
@@ -383,14 +412,23 @@ async function handleWaitingResponse(userPhone, message, user) {
       console.error('Supabase users clear after setup error:', clr2Err.message);
     }
 
-    await sendMessage(userPhone, `✅ Setup complete for ${month}.\nTotal sessions: ${total_sessions}\nCarry forward: ${carry_forward}\nPaid this month: ${paid_sessions}\nYou can now tap 'Attended'.`);
+    await sendMessage(userPhone,
+      `✅ *Setup complete for ${month}!*\n\n` +
+      `📊 *Monthly Plan*\n` +
+      `• Total sessions: ${total_sessions}\n` +
+      `• Cost per session: ₹${cost_per_session}\n` +
+      `• Carry forward: ${carry_forward}\n` +
+      `• Paid this month: ${paid_sessions}\n` +
+      `• *Total due: ₹${paid_sessions * cost_per_session}*\n\n` +
+      `You're all set! Tap *Attended* after each session 👇`
+    );
     return true;
   }
 
   if (user.waiting_for === 'setup_mid_config') {
     const parts = message.split(/\s+/).map(v => v.trim()).filter(Boolean);
     if (parts.length < 4 || parts.some(p => isNaN(parseInt(p, 10)))) {
-      await sendMessage(userPhone, `🧮 Mid‑month setup\nReply: [total] [cost] [carry] [used]\nEx: 16 800 2 6`);
+      await sendMessage(userPhone, `⚠️ *Invalid format*\n\nPlease reply with 4 numbers:\n*[total] [cost] [carry] [used]*\n\nExample: \`16 800 2 6\``);
       return true;
     }
     const total_sessions = parseInt(parts[0], 10);
@@ -412,7 +450,13 @@ async function handleWaitingResponse(userPhone, message, user) {
 
     await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
     const remaining = total_sessions - used;
-    await sendMessage(userPhone, `✅ Setup complete\n🧮 Total: ${total_sessions}\n✅ Done: ${used}\n🎯 Remaining: ${remaining}`);
+    await sendMessage(userPhone,
+      `✅ *Mid-month setup complete!*\n\n` +
+      `🧮 Total: ${total_sessions}\n` +
+      `✅ Already done: ${used}\n` +
+      `🎯 Remaining: ${remaining}\n\n` +
+      `Tap *Attended* after each session 👇`
+    );
     await sendQuickMenu(userPhone);
     return true;
   }
@@ -435,7 +479,7 @@ async function handleSummary(userPhone, user) {
   }
 
   if (!config) {
-    await sendMessage(userPhone, 'ℹ️ No config. Type "setup" to begin.');
+    await sendMessage(userPhone, `⚙️ *No data yet!*\n\nType *setup* to configure your monthly tracking first.`);
     return;
   }
 
@@ -463,11 +507,20 @@ async function handleSummary(userPhone, user) {
   });
 
   const summary = 
-    `📊 ${monthName} Summary\n\n` +
-    `✅ Done: ${attended}\n` +
-    `❌ Missed: ${cancelled}\n` +
-    `🎯 Remaining: ${remaining}\n\n` +
-    `💰 Due: ₹${config.paid_sessions * config.cost_per_session}`;
+    `📊 *${monthName} Summary*\n\n` +
+    `💰 *Payment*\n` +
+    `• Sessions paid: ${config.paid_sessions}\n` +
+    `• Carry forward: ${config.carry_forward || 0}\n` +
+    `• Rate: ₹${config.cost_per_session}/session\n` +
+    `• Total due: ₹${config.paid_sessions * config.cost_per_session}\n\n` +
+    `📈 *Attendance*\n` +
+    `• ✅ Attended: ${attended}\n` +
+    `• ❌ Missed: ${cancelled}\n` +
+    `• 🎯 Remaining: ${remaining}\n\n` +
+    `💸 *Cost Breakdown*\n` +
+    `• Used: ₹${amountUsed}\n` +
+    `• Wasted: ₹${amountWasted}\n\n` +
+    `_${new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}_`;
 
   await sendMessage(userPhone, summary);
   if (user?.waiting_for && user.waiting_for.startsWith && user.waiting_for.startsWith('state:')) {
@@ -477,7 +530,7 @@ async function handleSummary(userPhone, user) {
 
 // Handle setup
 async function handleSetup(userPhone) {
-  await sendMessage(userPhone, `⚙️ Setup\nChoose a mode:`);
+  await sendMessage(userPhone, `⚙️ *Monthly Setup*\n\nChoose how to set up this month:`);
   await sendSetupMode(userPhone);
 
   const { error: setWaitErr } = await supabase
@@ -512,7 +565,7 @@ async function handleHoliday(userPhone, message) {
     }
   }
 
-  await sendMessage(userPhone, `🏖️ Marked ${days} day(s) off`);
+  await sendMessage(userPhone, `🏖️ *${days} day(s) marked as holiday!*\n\nThese days won't count against your sessions.`);
 }
 
 // Send WhatsApp message
@@ -549,9 +602,9 @@ async function sendQuickMenu(to) {
       const lst = Array.isArray(ss)?ss:[];
       const att = lst.filter(s=>s.status==='attended').length;
       const totalSessions = (cfg.paid_sessions || 0) + (cfg.carry_forward || 0);
-      stats = `${month} • ${att}/${totalSessions} attended`;
+      stats = `📅 ${month}\n✅ ${att} of ${totalSessions} sessions attended`;
     } else {
-      stats = `${month} • setup pending`;
+      stats = `📅 ${month}\n⚙️ Setup not done yet`;
     }
     await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp',
@@ -559,12 +612,12 @@ async function sendQuickMenu(to) {
       type: 'interactive',
       interactive: {
         type: 'button',
-        body: { text: `${stats}\nChoose an action:` },
+        body: { text: `${stats}\n\nWhat would you like to do?` },
         action: {
           buttons: [
-            { type: 'reply', reply: { id: 'attended', title: 'Attended' } },
-            { type: 'reply', reply: { id: 'missed', title: 'Missed' } },
-            { type: 'reply', reply: { id: 'summary', title: 'Summary' } }
+            { type: 'reply', reply: { id: 'attended', title: '✅ Attended' } },
+            { type: 'reply', reply: { id: 'missed', title: '❌ Missed' } },
+            { type: 'reply', reply: { id: 'summary', title: '📊 Summary' } }
           ]
         }
       }
@@ -600,6 +653,8 @@ async function sendMoreMenu(to) {
             ]},
             { title: 'Settings', rows: [
               { id: 'setup_other', title: 'Update configuration' },
+              { id: 'setup_fresh', title: 'Setup • Start Fresh' },
+              { id: 'setup_mid', title: 'Setup • Start Mid‑Month' },
               { id: 'reset', title: 'Reset month' }
             ]}
           ]
@@ -608,6 +663,35 @@ async function sendMoreMenu(to) {
     }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
   } catch (e) {
     console.error('Error sending more menu:', e.response?.data || e.message);
+  }
+}
+
+async function sendMissedDatePicker(to) {
+  try {
+    const today = new Date();
+    const rows = [];
+    const todayStr = new Date(today).toISOString().split('T')[0];
+    rows.push({ id: `missed_date:${todayStr}`, title: 'Today', description: todayStr });
+    for (let i = 1; i <= 7; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const date = d.toISOString().split('T')[0];
+      const label = i === 1 ? 'Yesterday' : `${i} days ago`;
+      rows.push({ id: `missed_date:${date}`, title: label, description: date });
+    }
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: '❌ Log Missed Session' },
+        body: { text: 'Which date was the session missed?\nAfter selecting, you\'ll be asked for the reason.' },
+        action: { button: '📅 Choose date', sections: [{ title: 'Last 7 days', rows }] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending missed date picker:', e.response?.data || e.message);
   }
 }
 
@@ -705,8 +789,8 @@ async function sendYesNo(to, text) {
         type: 'button',
         body: { text },
         action: { buttons: [
-          { type: 'reply', reply: { id: 'confirm_yes', title: 'Yes' } },
-          { type: 'reply', reply: { id: 'confirm_no', title: 'No' } }
+          { type: 'reply', reply: { id: 'confirm_yes', title: '✅ Yes' } },
+          { type: 'reply', reply: { id: 'confirm_no', title: '❌ No' } }
         ] }
       }
     }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
@@ -733,7 +817,7 @@ async function confirmAttended(userPhone) {
     .single();
   if (!config) {
     await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
-    await sendMessage(userPhone, `No config set. Type 'setup' first.`);
+    await sendMessage(userPhone, `⚙️ *Setup required!*\n\nNo config found for this month.\nType *setup* to get started.`);
     return;
   }
   const { data: dup } = await supabase
@@ -744,7 +828,7 @@ async function confirmAttended(userPhone) {
     .eq('status', 'attended');
   if (Array.isArray(dup) && dup.length) {
     await supabase.from('users').update({ waiting_for: `dup_attend:${today}:${count}` }).eq('phone', userPhone);
-    await sendYesNo(userPhone, 'Already logged today. Add again?');
+    await sendYesNo(userPhone, `⚠️ *Already logged today!*\n\nYou've already recorded a session for today.\nWant to add another one?`);
     return;
   }
   await insertSessionsWithFallback({ userPhone, childId, date: today, count, status: 'attended', month: currentMonth });
@@ -758,7 +842,7 @@ async function confirmAttended(userPhone) {
   const totalSessions = (config.paid_sessions || 0) + (config.carry_forward || 0);
   const remaining = totalSessions - attended;
   await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
-  await sendMessage(userPhone, `✅ Session logged\n🎯 ${remaining} left this month`);
+  await sendMessage(userPhone, `✅ *Session logged!*\n\n🎯 *${remaining}* sessions left this month`);
   await sendQuickMenu(userPhone);
 }
 
