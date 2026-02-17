@@ -279,7 +279,15 @@ async function handleWaitingResponse(userPhone, message, user) {
   if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('state:AWAITING_CONFIRMATION')) {
     const yes = message === 'yes' || message === 'y' || message === 'confirm_yes';
     const no = message === 'no' || message === 'n' || message === 'confirm_no';
-    if (yes) { await confirmAttended(userPhone); return true; }
+    const { intent } = parseIntent(message);
+    // Treat 'attended' while waiting as implicit YES
+    if (yes || intent === 'ATTENDED') { await confirmAttended(userPhone); return true; }
+    // Allow switching to 'missed' directly from confirmation state
+    if (intent === 'MISSED') {
+      await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+      await handleMissed(userPhone);
+      return true;
+    }
     if (no) {
       await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
       await sendMessage(userPhone, 'Okay, not logged.');
