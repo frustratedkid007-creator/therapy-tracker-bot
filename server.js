@@ -155,6 +155,21 @@ async function handleMessage(userPhone, message) {
       const date = message.split(':')[1];
       await supabase.from('users').update({ waiting_for: `missed_reason:${date}` }).eq('phone', userPhone);
       await sendMessage(userPhone, `Reason for missing on ${date}?`);
+    } else if (message === 'backfill_attended') {
+      await sendBackfillDatePicker(userPhone, 'attended');
+    } else if (message === 'backfill_missed') {
+      await sendBackfillDatePicker(userPhone, 'missed');
+    } else if (message.startsWith('backfill_date:')) {
+      const parts = message.split(':');
+      const type = parts[1];
+      const date = parts[2];
+      if (type === 'attended') {
+        await supabase.from('users').update({ waiting_for: `backfill_attended_count:${date}` }).eq('phone', userPhone);
+        await sendBackfillCountPicker(userPhone, 'attended', date);
+      } else if (type === 'missed') {
+        await supabase.from('users').update({ waiting_for: `backfill_missed_count:${date}` }).eq('phone', userPhone);
+        await sendBackfillCountPicker(userPhone, 'missed', date);
+      }
     } else if (message === 'holiday_today') {
       await markHolidayRange(userPhone, 1);
     } else if (message === 'holiday_next3') {
@@ -191,6 +206,8 @@ async function handleMessage(userPhone, message) {
       await handleSetup(userPhone);
     } else if (message.includes('holiday') || message.includes('leave')) {
       await showHolidayPicker(userPhone);
+    } else if (message.includes('more') || message.includes('menu')) {
+      await sendMoreMenu(userPhone);
     } else {
       await sendMessage(userPhone, `👇 Quick actions`);
       await sendQuickMenu(userPhone);
@@ -407,23 +424,19 @@ async function handleWaitingResponse(userPhone, message, user) {
     const no = message === 'no' || message === 'n' || message === 'confirm_no';
     const parts = user.waiting_for.split(':');
     const date = parts[1];
-    const reason = Buffer.from(parts.slice(2).join(':'), 'base64').toString('utf8');
+    let count = 1;
+    let payloadIndex = 2;
+    if (parts[2] && !isNaN(parseInt(parts[2], 10))) {
+      count = Math.max(1, parseInt(parts[2], 10));
+      payloadIndex = 3;
+    }
+    const reason = Buffer.from(parts.slice(payloadIndex).join(':'), 'base64').toString('utf8');
     if (yes) {
       const childId = await getOrCreateDefaultChild(userPhone);
       const month = date.slice(0,7);
-      const { error: insErr } = await supabase.from('sessions').insert({
-        user_phone: userPhone,
-        child_id: childId,
-        logged_by: userPhone,
-        sessions_done: 1,
-        date,
-        status: 'cancelled',
-        reason,
-        month
-      });
-      if (insErr) console.error('dup_missed insert error:', insErr.message);
+      await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'cancelled', month, reason });
       await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
-      await sendMessage(userPhone, `❌ Missed logged again\n🗓 ${date}\n📝 ${reason}`);
+      await sendMessage(userPhone, `❌ Missed logged again\n🗓 ${date}\n🔢 ${count}\n📝 ${reason}`);
       await sendQuickMenu(userPhone);
       return true;
     }
@@ -442,25 +455,22 @@ async function handleWaitingResponse(userPhone, message, user) {
     const no = message === 'no' || message === 'n' || message === 'confirm_no';
     const parts = user.waiting_for.split(':');
     const date = parts[1];
-    const reason = Buffer.from(parts.slice(2).join(':'), 'base64').toString('utf8');
+    let count = 1;
+    let payloadIndex = 2;
+    if (parts[2] && !isNaN(parseInt(parts[2], 10))) {
+      count = Math.max(1, parseInt(parts[2], 10));
+      payloadIndex = 3;
+    }
+    const reason = Buffer.from(parts.slice(payloadIndex).join(':'), 'base64').toString('utf8');
     if (yes) {
       const childId = await getOrCreateDefaultChild(userPhone);
       const key = childId ? 'child_id' : 'user_phone';
       const val = childId ? childId : userPhone;
       await supabase.from('sessions').delete().eq(key, val).eq('date', date).eq('status', 'attended');
       const month = date.slice(0,7);
-      await supabase.from('sessions').insert({
-        user_phone: userPhone,
-        child_id: childId,
-        logged_by: userPhone,
-        sessions_done: 1,
-        date,
-        status: 'cancelled',
-        reason,
-        month
-      });
+      await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'cancelled', month, reason });
       await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
-      await sendMessage(userPhone, `🔁 Replaced Attended with Missed\n🗓 ${date}\n📝 ${reason}`);
+      await sendMessage(userPhone, `🔁 Replaced Attended with Missed\n🗓 ${date}\n🔢 ${count}\n📝 ${reason}`);
       await sendQuickMenu(userPhone);
       return true;
     }
@@ -499,6 +509,121 @@ async function handleWaitingResponse(userPhone, message, user) {
       return true;
     }
     await sendYesNo(userPhone, 'Replace Missed with Attended?');
+    return true;
+  }
+
+  if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('backfill_attended_count:')) {
+    const date = user.waiting_for.split(':')[1];
+    if (!message.startsWith('backfill_count:')) {
+      await sendBackfillCountPicker(userPhone, 'attended', date);
+      return true;
+    }
+    const count = Math.max(1, parseInt(message.split(':')[1] || '1', 10));
+    const month = date.slice(0,7);
+    const childId = await getOrCreateDefaultChild(userPhone);
+    const idKey = childId ? 'child_id' : 'user_phone';
+    const idVal = childId ? childId : userPhone;
+    const { data: existing } = await supabase.from('sessions').select('status').eq(idKey, idVal).eq('date', date);
+    const hasMissed = Array.isArray(existing) && existing.some(r => r.status === 'cancelled');
+    const hasAttended = Array.isArray(existing) && existing.some(r => r.status === 'attended');
+    if (hasMissed) {
+      await supabase.from('users').update({ waiting_for: `repl_can_attend:${date}:${count}` }).eq('phone', userPhone);
+      await sendYesNo(userPhone, `Already marked Missed on ${date}. Replace with Attended?`);
+      return true;
+    }
+    if (hasAttended) {
+      await supabase.from('users').update({ waiting_for: `dup_attend:${date}:${count}` }).eq('phone', userPhone);
+      await sendYesNo(userPhone, `Already marked Attended on ${date}. Add again?`);
+      return true;
+    }
+    await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'attended', month, reason: 'backfill' });
+    await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+    await sendMessage(userPhone, `✅ Backfilled Attended\n🗓 ${date}\n🔢 ${count}`);
+    await sendQuickMenu(userPhone);
+    return true;
+  }
+
+  if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('backfill_missed_count:')) {
+    const date = user.waiting_for.split(':')[1];
+    if (!message.startsWith('backfill_count:')) {
+      await sendBackfillCountPicker(userPhone, 'missed', date);
+      return true;
+    }
+    const count = Math.max(1, parseInt(message.split(':')[1] || '1', 10));
+    await supabase.from('users').update({ waiting_for: `backfill_missed_reason:${date}:${count}` }).eq('phone', userPhone);
+    await sendBackfillReasonPicker(userPhone);
+    return true;
+  }
+
+  if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('backfill_missed_reason:')) {
+    const parts = user.waiting_for.split(':');
+    const date = parts[1];
+    const count = Math.max(1, parseInt(parts[2] || '1', 10));
+    if (!message.startsWith('backfill_reason:')) {
+      await sendBackfillReasonPicker(userPhone);
+      return true;
+    }
+    const reasonKey = message.split(':')[1];
+    if (reasonKey === 'other') {
+      await supabase.from('users').update({ waiting_for: `backfill_missed_note:${date}:${count}` }).eq('phone', userPhone);
+      await sendMessage(userPhone, `Type reason for ${date}`);
+      return true;
+    }
+    const reason = reasonKey === 'sick' ? 'Sick' : reasonKey === 'travel' ? 'Travel' : reasonKey === 'therapist' ? 'Therapist unavailable' : 'Other';
+    const month = date.slice(0,7);
+    const childId = await getOrCreateDefaultChild(userPhone);
+    const idKey = childId ? 'child_id' : 'user_phone';
+    const idVal = childId ? childId : userPhone;
+    const { data: existing } = await supabase.from('sessions').select('status').eq(idKey, idVal).eq('date', date);
+    const hasAttended = Array.isArray(existing) && existing.some(r => r.status === 'attended');
+    const hasMissed = Array.isArray(existing) && existing.some(r => r.status === 'cancelled');
+    if (hasAttended) {
+      const payload = Buffer.from(reason, 'utf8').toString('base64');
+      await supabase.from('users').update({ waiting_for: `replace_with_missed:${date}:${count}:${payload}` }).eq('phone', userPhone);
+      await sendYesNo(userPhone, `Already marked Attended on ${date}. Replace with Missed?`);
+      return true;
+    }
+    if (hasMissed) {
+      const payload = Buffer.from(reason, 'utf8').toString('base64');
+      await supabase.from('users').update({ waiting_for: `dup_missed:${date}:${count}:${payload}` }).eq('phone', userPhone);
+      await sendYesNo(userPhone, `Already marked Missed on ${date}. Add again?`);
+      return true;
+    }
+    await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'cancelled', month, reason });
+    await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+    await sendMessage(userPhone, `❌ Backfilled Missed\n🗓 ${date}\n🔢 ${count}\n📝 ${reason}`);
+    await sendQuickMenu(userPhone);
+    return true;
+  }
+
+  if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('backfill_missed_note:')) {
+    const parts = user.waiting_for.split(':');
+    const date = parts[1];
+    const count = Math.max(1, parseInt(parts[2] || '1', 10));
+    const reason = message;
+    const month = date.slice(0,7);
+    const childId = await getOrCreateDefaultChild(userPhone);
+    const idKey = childId ? 'child_id' : 'user_phone';
+    const idVal = childId ? childId : userPhone;
+    const { data: existing } = await supabase.from('sessions').select('status').eq(idKey, idVal).eq('date', date);
+    const hasAttended = Array.isArray(existing) && existing.some(r => r.status === 'attended');
+    const hasMissed = Array.isArray(existing) && existing.some(r => r.status === 'cancelled');
+    if (hasAttended) {
+      const payload = Buffer.from(reason, 'utf8').toString('base64');
+      await supabase.from('users').update({ waiting_for: `replace_with_missed:${date}:${count}:${payload}` }).eq('phone', userPhone);
+      await sendYesNo(userPhone, `Already marked Attended on ${date}. Replace with Missed?`);
+      return true;
+    }
+    if (hasMissed) {
+      const payload = Buffer.from(reason, 'utf8').toString('base64');
+      await supabase.from('users').update({ waiting_for: `dup_missed:${date}:${count}:${payload}` }).eq('phone', userPhone);
+      await sendYesNo(userPhone, `Already marked Missed on ${date}. Add again?`);
+      return true;
+    }
+    await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'cancelled', month, reason });
+    await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+    await sendMessage(userPhone, `❌ Backfilled Missed\n🗓 ${date}\n🔢 ${count}\n📝 ${reason}`);
+    await sendQuickMenu(userPhone);
     return true;
   }
 
@@ -613,6 +738,8 @@ async function handleSummary(userPhone, user) {
   const remaining = totalSessions - attended;
   const amountUsed = Math.max(0, Math.min(attended, config.paid_sessions || 0)) * (config.cost_per_session || 0);
   const amountCancelled = Math.max(0, Math.min(cancelled, Math.max((config.paid_sessions || 0) - Math.min(attended, config.paid_sessions || 0), 0))) * (config.cost_per_session || 0);
+  const bufferSessions = Math.max(0, totalSessions - attended - cancelled);
+  const bufferValue = bufferSessions * (config.cost_per_session || 0);
 
   const dt = new Date(currentMonth + '-01');
   const monthName = dt.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }).toUpperCase();
@@ -622,11 +749,12 @@ async function handleSummary(userPhone, user) {
   const isLastWeek = now >= lastWeekStart;
 
   const header = `📊 ${monthName} SUMMARY`;
-  const payment = `💰 PAYMENT\n• Paid: ${config.paid_sessions || 0} sessions\n• Cost: ₹${config.cost_per_session || 0}/session\n• Total: ₹${(config.paid_sessions || 0) * (config.cost_per_session || 0)}`;
+  const payment = `💰 PAYMENT\n• Paid: ${config.paid_sessions || 0} sessions\n• Cost: ₹${config.cost_per_session || 0}/session\n• Total paid: ₹${(config.paid_sessions || 0) * (config.cost_per_session || 0)}`;
   const attendance = `📈 ATTENDANCE\n• Attended: ${attended} (₹${amountUsed})\n• Cancelled: ${cancelled} (₹${amountCancelled})`;
+  const costBreakdown = `💸 COST BREAKDOWN\n• Used: ₹${amountUsed}\n• Buffer: ₹${bufferValue}`;
   const summaryBlock = `✨ SUMMARY\n• Remaining: ${Math.max(0, remaining)} sessions` + (isLastWeek ? `\n• Carry forward: ${Math.max(0, remaining)} sessions` : '');
 
-  const summary = [header, '', payment, '', attendance, '', summaryBlock].join('\n');
+  const summary = [header, '', payment, '', attendance, '', costBreakdown, '', summaryBlock].join('\n');
 
   await sendMessage(userPhone, summary);
   if (user?.waiting_for && user.waiting_for.startsWith && user.waiting_for.startsWith('state:')) {
@@ -718,7 +846,7 @@ async function sendQuickMenu(to) {
       type: 'interactive',
       interactive: {
         type: 'button',
-        body: { text: `${stats}\nChoose an action:` },
+        body: { text: `${stats}\nChoose an action:\nMore options: type 'more'` },
         action: {
           buttons: [
             { type: 'reply', reply: { id: 'attended', title: 'Attended' } },
@@ -753,6 +881,8 @@ async function sendMoreMenu(to) {
           sections: [
             { title: 'Tools', rows: [
               { id: 'summary', title: 'Monthly summary' },
+              { id: 'backfill_attended', title: 'Backfill • Attended' },
+              { id: 'backfill_missed', title: 'Backfill • Missed' },
               { id: 'holiday_range', title: 'Mark absence (range)' },
               { id: 'holiday_next3', title: 'Mark next 3 days' },
               { id: 'holiday_next7', title: 'Mark next 7 days' }
@@ -838,6 +968,75 @@ async function sendMissedDatePicker(to) {
     }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
   } catch (e) {
     console.error('Error sending missed date picker:', e.response?.data || e.message);
+  }
+}
+
+async function sendBackfillDatePicker(to, type) {
+  try {
+    const today = new Date();
+    const rows = [];
+    for (let i = 0; i <= 20; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const date = d.toISOString().split('T')[0];
+      rows.push({ id: `backfill_date:${type}:${date}`, title: i === 0 ? `${date} (Today)` : date });
+    }
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: type === 'attended' ? 'Backfill Attended' : 'Backfill Missed' },
+        body: { text: 'Pick a date' },
+        action: { button: 'Choose date', sections: [{ title: 'Last 21 days', rows }] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending backfill date picker:', e.response?.data || e.message);
+  }
+}
+
+async function sendBackfillCountPicker(to, type, date) {
+  try {
+    const rows = [1, 2, 3, 4, 5].map(n => ({ id: `backfill_count:${n}`, title: `${n} session${n > 1 ? 's' : ''}` }));
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: type === 'attended' ? 'How many attended?' : 'How many missed?' },
+        body: { text: `Date: ${date}` },
+        action: { button: 'Choose count', sections: [{ title: 'Sessions', rows }] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending backfill count picker:', e.response?.data || e.message);
+  }
+}
+
+async function sendBackfillReasonPicker(to) {
+  try {
+    const rows = [
+      { id: 'backfill_reason:sick', title: 'Sick' },
+      { id: 'backfill_reason:travel', title: 'Travel' },
+      { id: 'backfill_reason:therapist', title: 'Therapist unavailable' },
+      { id: 'backfill_reason:other', title: 'Other' }
+    ];
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: 'Reason for missed' },
+        body: { text: 'Pick a reason' },
+        action: { button: 'Choose reason', sections: [{ title: 'Reasons', rows }] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending backfill reason picker:', e.response?.data || e.message);
   }
 }
 
