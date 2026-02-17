@@ -846,12 +846,12 @@ async function sendQuickMenu(to) {
       type: 'interactive',
       interactive: {
         type: 'button',
-        body: { text: `${stats}\nChoose an action:\nMore options: type 'more'` },
+        body: { text: `${stats}\nWhat would you like to do?` },
         action: {
           buttons: [
-            { type: 'reply', reply: { id: 'attended', title: 'Attended' } },
-            { type: 'reply', reply: { id: 'missed', title: 'Missed' } },
-            { type: 'reply', reply: { id: 'summary', title: 'Summary' } }
+            { type: 'reply', reply: { id: 'attended', title: '✅ Attended' } },
+            { type: 'reply', reply: { id: 'missed', title: '❌ Missed' } },
+            { type: 'reply', reply: { id: 'summary', title: '📊 Summary' } }
           ]
         }
       }
