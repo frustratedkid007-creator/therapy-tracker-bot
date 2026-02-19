@@ -56,7 +56,7 @@ async function runOnce() {
   }
 
   // Pull user settings into a map
-  const { data: users, error } = await supabase.from('users').select('phone, reminders_enabled, last_reminder_sent')
+  const { data: users, error } = await supabase.from('users').select('*')
   if (error) throw new Error(error.message)
   const uMap = new Map((users || []).map(u => [u.phone, u]))
 

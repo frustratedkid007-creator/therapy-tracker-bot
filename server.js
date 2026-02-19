@@ -36,6 +36,7 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'therapy_tracker_2025';
 const WHATSAPP_APP_SECRET = process.env.WHATSAPP_APP_SECRET;
+const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || 'Asia/Kolkata';
 const processedMessageIds = new Map();
 const duplicateWindowMs = 5 * 60 * 1000;
 
@@ -78,6 +79,33 @@ async function shouldProcessInboundMessage(messageId) {
   } catch {
     return true;
   }
+}
+
+function nowPartsInTimeZone(timeZone) {
+  const tz = timeZone || DEFAULT_TIMEZONE;
+  const now = new Date();
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  return { today, month: today.slice(0, 7), timeZone: tz };
+}
+
+async function getUserTimeZone(userPhone) {
+  try {
+    const { data: u } = await supabase.from('users').select('*').eq('phone', userPhone).single();
+    return (u && typeof u.timezone === 'string' && u.timezone) ? u.timezone : DEFAULT_TIMEZONE;
+  } catch (_) {
+    return DEFAULT_TIMEZONE;
+  }
+}
+
+function lastNDatesFromToday(todayStr, n) {
+  const base = new Date(`${todayStr}T00:00:00Z`);
+  const out = [];
+  for (let i = 0; i <= n; i++) {
+    const d = new Date(base);
+    d.setUTCDate(d.getUTCDate() - i);
+    out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
 }
 
 // Webhook verification (required by Meta)
@@ -293,10 +321,7 @@ async function createUser(phone) {
 
 // Handle attended session
 async function handleAttended(userPhone, user) {
-  const today = new Date().toISOString().split('T')[0];
-  
-  // Get current month config
-  const currentMonth = new Date().toISOString().slice(0, 7);
+  const { today, month: currentMonth } = nowPartsInTimeZone(user && typeof user.timezone === 'string' ? user.timezone : DEFAULT_TIMEZONE);
   const { data: config, error: cfgErr } = await supabase
     .from('monthly_config')
     .select('*')
@@ -431,8 +456,8 @@ async function handleWaitingResponse(userPhone, message, user) {
   }
 
   if (user.waiting_for === 'cancellation_reason') {
-    const today = new Date().toISOString().split('T')[0];
-    const currentMonth = new Date().toISOString().slice(0, 7);
+    const tz = await getUserTimeZone(userPhone);
+    const { today, month: currentMonth } = nowPartsInTimeZone(tz);
 
     const { error: canErr } = await supabase.from('sessions').insert({
       user_phone: userPhone,
@@ -738,7 +763,8 @@ async function handleWaitingResponse(userPhone, message, user) {
     const cost_per_session = parseInt(parts[1], 10);
     const carry_forward = parseInt(parts[2], 10);
     const paid_sessions = Math.max(0, total_sessions - carry_forward);
-    const month = new Date().toISOString().slice(0, 7);
+    const tz = await getUserTimeZone(userPhone);
+    const { month } = nowPartsInTimeZone(tz);
 
     const { error: upsertErr } = await supabase
       .from('monthly_config')
@@ -778,7 +804,8 @@ async function handleWaitingResponse(userPhone, message, user) {
     const carry_forward = parseInt(parts[2], 10);
     const used = Math.max(0, parseInt(parts[3], 10));
     const paid_sessions = Math.max(0, total_sessions - carry_forward);
-    const month = new Date().toISOString().slice(0, 7);
+    const tz = await getUserTimeZone(userPhone);
+    const { month } = nowPartsInTimeZone(tz);
 
     const { error: upErr } = await supabase.from('monthly_config').upsert([
       { user_phone: userPhone, month, paid_sessions, cost_per_session, carry_forward }
@@ -801,7 +828,7 @@ async function handleWaitingResponse(userPhone, message, user) {
 
 // Handle summary request
 async function handleSummary(userPhone, user) {
-  const currentMonth = new Date().toISOString().slice(0, 7);
+  const { month: currentMonth } = nowPartsInTimeZone(user && typeof user.timezone === 'string' ? user.timezone : DEFAULT_TIMEZONE);
   
   // Get config
   const { data: config, error: cfgErr2 } = await supabase
@@ -898,13 +925,14 @@ async function handleHoliday(userPhone, message) {
   const daysMatch = message.match(/(\d+)\s*days?/);
   const days = daysMatch ? parseInt(daysMatch[1]) : 1;
   
-  const currentMonth = new Date().toISOString().slice(0, 7);
-  const today = new Date();
+  const tz = await getUserTimeZone(userPhone);
+  const { today, month: currentMonth } = nowPartsInTimeZone(tz);
+  const base = new Date(`${today}T00:00:00Z`);
 
   for (let i = 0; i < days; i++) {
-    const date = new Date(today);
-    date.setDate(date.getDate() + i);
-    const dateStr = date.toISOString().split('T')[0];
+    const date = new Date(base);
+    date.setUTCDate(date.getUTCDate() + i);
+    const dateStr = date.toISOString().slice(0,10);
 
     const { error: holErr } = await supabase.from('holidays').insert({
       user_phone: userPhone,
@@ -945,7 +973,8 @@ async function sendMessage(to, text) {
 
 async function sendQuickMenu(to) {
   try {
-    const month = new Date().toISOString().slice(0,7);
+    const tz = await getUserTimeZone(to);
+    const { month } = nowPartsInTimeZone(tz);
     let stats = '';
     const { data: cfg } = await supabase.from('monthly_config').select('*').eq('user_phone', to).eq('month', month).single();
     if (cfg) {
@@ -1048,12 +1077,13 @@ async function showHolidayPicker(to) {
 }
 
 async function markHolidayRange(userPhone, days) {
-  const currentMonth = new Date().toISOString().slice(0, 7);
-  const today = new Date();
+  const tz = await getUserTimeZone(userPhone);
+  const { today, month: currentMonth } = nowPartsInTimeZone(tz);
+  const base = new Date(`${today}T00:00:00Z`);
   for (let i = 0; i < days; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() + i);
-    const dateStr = d.toISOString().split('T')[0];
+    const d = new Date(base);
+    d.setUTCDate(d.getUTCDate() + i);
+    const dateStr = d.toISOString().slice(0,10);
     const { error } = await supabase.from('holidays').insert({ user_phone: userPhone, date: dateStr, month: currentMonth });
     if (error) console.error('Supabase holidays insert error:', error.message);
   }
@@ -1062,16 +1092,10 @@ async function markHolidayRange(userPhone, days) {
 
 async function sendMissedDatePicker(to) {
   try {
-    const today = new Date();
-    const rows = [];
-    const todayStr = new Date(today).toISOString().split('T')[0];
-    rows.push({ id: `missed_date:${todayStr}`, title: `${todayStr} (Today)` });
-    for (let i = 1; i <= 7; i++) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const date = d.toISOString().split('T')[0];
-      rows.push({ id: `missed_date:${date}`, title: date });
-    }
+    const tz = await getUserTimeZone(to);
+    const { today } = nowPartsInTimeZone(tz);
+    const days = lastNDatesFromToday(today, 7);
+    const rows = days.map((d, idx) => ({ id: `missed_date:${d}`, title: idx === 0 ? `${d} (Today)` : d }));
     await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp',
       to,
@@ -1090,16 +1114,10 @@ async function sendMissedDatePicker(to) {
 
 async function sendAttendedDatePicker(to) {
   try {
-    const today = new Date();
-    const rows = [];
-    const todayStr = new Date(today).toISOString().split('T')[0];
-    rows.push({ id: `attended_date:${todayStr}`, title: `${todayStr} (Today)` });
-    for (let i = 1; i <= 7; i++) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const date = d.toISOString().split('T')[0];
-      rows.push({ id: `attended_date:${date}`, title: date });
-    }
+    const tz = await getUserTimeZone(to);
+    const { today } = nowPartsInTimeZone(tz);
+    const days = lastNDatesFromToday(today, 7);
+    const rows = days.map((d, idx) => ({ id: `attended_date:${d}`, title: idx === 0 ? `${d} (Today)` : d }));
     await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp',
       to,
@@ -1137,14 +1155,10 @@ async function sendAttendedCountPicker(to, date) {
 
 async function sendBackfillDatePicker(to, type) {
   try {
-    const today = new Date();
-    const rows = [];
-    for (let i = 0; i <= 20; i++) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const date = d.toISOString().split('T')[0];
-      rows.push({ id: `backfill_date:${type}:${date}`, title: i === 0 ? `${date} (Today)` : date });
-    }
+    const tz = await getUserTimeZone(to);
+    const { today } = nowPartsInTimeZone(tz);
+    const days = lastNDatesFromToday(today, 20);
+    const rows = days.map((d, idx) => ({ id: `backfill_date:${type}:${d}`, title: idx === 0 ? `${d} (Today)` : d }));
     await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp',
       to,
@@ -1309,9 +1323,8 @@ async function sendYesNo(to, text) {
 }
 
 async function confirmAttended(userPhone) {
-  const today = new Date().toISOString().split('T')[0];
-  const currentMonth = new Date().toISOString().slice(0, 7);
-  const { data: u } = await supabase.from('users').select('waiting_for').eq('phone', userPhone).single();
+  const { data: u } = await supabase.from('users').select('*').eq('phone', userPhone).single();
+  const { today, month: currentMonth } = nowPartsInTimeZone((u && typeof u.timezone === 'string') ? u.timezone : DEFAULT_TIMEZONE);
   let count = 1;
   if (u?.waiting_for && typeof u.waiting_for === 'string') {
     const m = u.waiting_for.match(/state:AWAITING_CONFIRMATION:(\d+)/);

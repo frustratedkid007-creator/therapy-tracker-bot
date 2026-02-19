@@ -5,6 +5,9 @@ CREATE TABLE users (
   id BIGSERIAL PRIMARY KEY,
   phone TEXT UNIQUE NOT NULL,
   waiting_for TEXT,
+  timezone TEXT DEFAULT 'Asia/Kolkata',
+  reminders_enabled BOOLEAN DEFAULT TRUE,
+  last_reminder_sent DATE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
