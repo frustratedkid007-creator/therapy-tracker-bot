@@ -1,13 +1,19 @@
 const express = require('express');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 
 function validateEnv() {
   const required = ['SUPABASE_URL', 'SUPABASE_KEY', 'WHATSAPP_TOKEN', 'PHONE_NUMBER_ID'];
+  if (process.env.NODE_ENV === 'production' && process.env.SKIP_WEBHOOK_SIGNATURE !== 'true') required.push('WHATSAPP_APP_SECRET');
   const missing = required.filter((k) => !process.env[k] || process.env[k].trim() === '');
   if (missing.length) {
     console.error(`Missing environment variables: ${missing.join(', ')}`);
@@ -29,6 +35,50 @@ const supabase = createClient(process.env.SUPABASE_URL, supabaseKey);
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'therapy_tracker_2025';
+const WHATSAPP_APP_SECRET = process.env.WHATSAPP_APP_SECRET;
+const processedMessageIds = new Map();
+const duplicateWindowMs = 5 * 60 * 1000;
+
+function safeEqual(a, b) {
+  const aa = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (aa.length !== bb.length) return false;
+  return crypto.timingSafeEqual(aa, bb);
+}
+
+function verifyWebhookSignature(req) {
+  if (process.env.SKIP_WEBHOOK_SIGNATURE === 'true') return true;
+  if (!WHATSAPP_APP_SECRET) return false;
+  const signature = req.get('x-hub-signature-256');
+  if (!signature) return false;
+  const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+  const expected = `sha256=${crypto.createHmac('sha256', WHATSAPP_APP_SECRET).update(rawBody).digest('hex')}`;
+  return safeEqual(signature, expected);
+}
+
+function seenRecently(messageId) {
+  if (!messageId) return false;
+  const now = Date.now();
+  for (const [id, ts] of processedMessageIds.entries()) {
+    if (now - ts > duplicateWindowMs) processedMessageIds.delete(id);
+  }
+  if (processedMessageIds.has(messageId)) return true;
+  processedMessageIds.set(messageId, now);
+  return false;
+}
+
+async function shouldProcessInboundMessage(messageId) {
+  if (!messageId) return true;
+  if (seenRecently(messageId)) return false;
+  try {
+    const { error } = await supabase.from('processed_inbound_messages').insert({ message_id: messageId });
+    if (!error) return true;
+    if (String(error.code) === '23505') return false;
+    return true;
+  } catch {
+    return true;
+  }
+}
 
 // Webhook verification (required by Meta)
 app.get('/webhook', (req, res) => {
@@ -47,6 +97,10 @@ app.get('/webhook', (req, res) => {
 // Receive messages
 app.post('/webhook', async (req, res) => {
   try {
+    if (!verifyWebhookSignature(req)) {
+      res.sendStatus(403);
+      return;
+    }
     const body = req.body;
 
     if (body.object === 'whatsapp_business_account') {
@@ -56,6 +110,11 @@ app.post('/webhook', async (req, res) => {
       
       if (value?.messages?.[0]) {
         const message = value.messages[0];
+        const ok = await shouldProcessInboundMessage(message.id);
+        if (!ok) {
+          res.sendStatus(200);
+          return;
+        }
         const from = message.from;
         let messageBody = (message.text?.body || '').toLowerCase().trim();
         if (message.type === 'interactive') {
@@ -84,13 +143,7 @@ app.post('/webhook', async (req, res) => {
 async function handleMessage(userPhone, message) {
   try {
     if (!message) {
-      await sendMessage(userPhone,
-        `Quick commands:\n\n` +
-        `• 'attended' - log today's session\n` +
-        `• 'missed' - log cancelled session\n` +
-        `• 'summary' - monthly report\n` +
-        `• 'setup' - configure tracking`
-      );
+      await sendQuickMenu(userPhone);
       return;
     }
     // Get user's current state
@@ -114,6 +167,17 @@ async function handleMessage(userPhone, message) {
       return;
     }
 
+    if (message === 'cancel' || message === 'back' || message === 'menu') {
+      await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+      await sendQuickMenu(userPhone);
+      return;
+    }
+
+    if (message === 'undo' || message === 'undo_last') {
+      await handleUndo(userPhone);
+      return;
+    }
+
     // Check if waiting for response
     if (user.waiting_for) {
       const handled = await handleWaitingResponse(userPhone, message, user);
@@ -134,11 +198,9 @@ async function handleMessage(userPhone, message) {
         return;
       }
     } else {
-      const { intent, count } = parseIntent(message);
+      const { intent } = parseIntent(message);
       if (intent === 'ATTENDED') {
-        const suffix = count && count > 1 ? `:${count}` : '';
-        await supabase.from('users').update({ waiting_for: `state:AWAITING_CONFIRMATION${suffix}` }).eq('phone', userPhone);
-        await confirmAttended(userPhone);
+        await sendAttendedDatePicker(userPhone);
         return;
       }
       if (intent === 'MISSED') {
@@ -155,6 +217,10 @@ async function handleMessage(userPhone, message) {
       const date = message.split(':')[1];
       await supabase.from('users').update({ waiting_for: `missed_reason:${date}` }).eq('phone', userPhone);
       await sendMessage(userPhone, `Reason for missing on ${date}?`);
+    } else if (message.startsWith('attended_date:')) {
+      const date = message.split(':')[1];
+      await supabase.from('users').update({ waiting_for: `attended_count:${date}` }).eq('phone', userPhone);
+      await sendAttendedCountPicker(userPhone, date);
     } else if (message === 'backfill_attended') {
       await sendBackfillDatePicker(userPhone, 'attended');
     } else if (message === 'backfill_missed') {
@@ -194,10 +260,7 @@ async function handleMessage(userPhone, message) {
     } else if (message.includes('reset') || message === 'confirm_reset' || message === 'cancel_reset') {
       await handleReset(userPhone, message);
     } else if (message.includes('attended') || message === 'done' || message === 'ok' || message === '✓') {
-      const { count } = parseIntent(message);
-      const suffix = count && count > 1 ? `:${count}` : '';
-      await supabase.from('users').update({ waiting_for: `state:AWAITING_CONFIRMATION${suffix}` }).eq('phone', userPhone);
-      await confirmAttended(userPhone);
+      await sendAttendedDatePicker(userPhone);
     } else if (message.includes('missed') || message.includes('cancelled')) {
       await handleMissed(userPhone);
     } else if (message.includes('summary') || message.includes('report')) {
@@ -209,7 +272,6 @@ async function handleMessage(userPhone, message) {
     } else if (message.includes('more') || message.includes('menu')) {
       await sendMoreMenu(userPhone);
     } else {
-      await sendMessage(userPhone, `👇 Quick actions`);
       await sendQuickMenu(userPhone);
     }
   } catch (error) {
@@ -293,6 +355,11 @@ async function handleMissed(userPhone) {
 
 // Handle waiting responses
 async function handleWaitingResponse(userPhone, message, user) {
+  if (message === 'cancel' || message === 'back' || message === 'menu') {
+    await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+    await sendQuickMenu(userPhone);
+    return true;
+  }
   if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('state:AWAITING_CONFIRMATION')) {
     const yes = message === 'yes' || message === 'y' || message === 'confirm_yes';
     const no = message === 'no' || message === 'n' || message === 'confirm_no';
@@ -509,6 +576,37 @@ async function handleWaitingResponse(userPhone, message, user) {
       return true;
     }
     await sendYesNo(userPhone, 'Replace Missed with Attended?');
+    return true;
+  }
+
+  if (user.waiting_for && typeof user.waiting_for === 'string' && user.waiting_for.startsWith('attended_count:')) {
+    const date = user.waiting_for.split(':')[1];
+    if (!message.startsWith('attended_count:')) {
+      await sendAttendedCountPicker(userPhone, date);
+      return true;
+    }
+    const count = Math.max(1, parseInt(message.split(':')[1] || '1', 10));
+    const month = date.slice(0,7);
+    const childId = await getOrCreateDefaultChild(userPhone);
+    const idKey = childId ? 'child_id' : 'user_phone';
+    const idVal = childId ? childId : userPhone;
+    const { data: existing } = await supabase.from('sessions').select('status').eq(idKey, idVal).eq('date', date);
+    const hasMissed = Array.isArray(existing) && existing.some(r => r.status === 'cancelled');
+    const hasAttended = Array.isArray(existing) && existing.some(r => r.status === 'attended');
+    if (hasMissed) {
+      await supabase.from('users').update({ waiting_for: `repl_can_attend:${date}:${count}` }).eq('phone', userPhone);
+      await sendYesNo(userPhone, `Already marked Missed on ${date}. Replace with Attended?`);
+      return true;
+    }
+    if (hasAttended) {
+      await supabase.from('users').update({ waiting_for: `dup_attend:${date}:${count}` }).eq('phone', userPhone);
+      await sendYesNo(userPhone, `Already marked Attended on ${date}. Add again?`);
+      return true;
+    }
+    await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'attended', month });
+    await supabase.from('users').update({ waiting_for: null }).eq('phone', userPhone);
+    await sendMessage(userPhone, `✅ Attended logged\n🗓 ${date}\n🔢 ${count}`);
+    await sendQuickMenu(userPhone);
     return true;
   }
 
@@ -762,6 +860,25 @@ async function handleSummary(userPhone, user) {
   }
 }
 
+async function handleUndo(userPhone) {
+  const { data: last } = await supabase
+    .from('sessions')
+    .select('id,date,status,reason,created_at')
+    .eq('user_phone', userPhone)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  const row = Array.isArray(last) ? last[0] : null;
+  if (!row?.id) {
+    await sendMessage(userPhone, `Nothing to undo`);
+    await sendQuickMenu(userPhone);
+    return;
+  }
+  await supabase.from('sessions').delete().eq('id', row.id);
+  const label = row.status === 'attended' ? '✅ Attended' : '❌ Missed';
+  await sendMessage(userPhone, `↩️ Undone\n${label}\n🗓 ${String(row.date).slice(0,10)}`);
+  await sendQuickMenu(userPhone);
+}
+
 // Handle setup
 async function handleSetup(userPhone) {
   await sendMessage(userPhone, `⚙️ Setup\nChoose a mode:`);
@@ -968,6 +1085,53 @@ async function sendMissedDatePicker(to) {
     }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
   } catch (e) {
     console.error('Error sending missed date picker:', e.response?.data || e.message);
+  }
+}
+
+async function sendAttendedDatePicker(to) {
+  try {
+    const today = new Date();
+    const rows = [];
+    const todayStr = new Date(today).toISOString().split('T')[0];
+    rows.push({ id: `attended_date:${todayStr}`, title: `${todayStr} (Today)` });
+    for (let i = 1; i <= 7; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const date = d.toISOString().split('T')[0];
+      rows.push({ id: `attended_date:${date}`, title: date });
+    }
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: 'Pick session date' },
+        body: { text: 'Choose the date you attended' },
+        action: { button: 'Choose date', sections: [{ title: 'Last 7 days', rows }] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending attended date picker:', e.response?.data || e.message);
+  }
+}
+
+async function sendAttendedCountPicker(to, date) {
+  try {
+    const rows = [1, 2, 3, 4, 5].map(n => ({ id: `attended_count:${n}`, title: `${n} session${n > 1 ? 's' : ''}` }));
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: 'How many sessions?' },
+        body: { text: `Date: ${date}` },
+        action: { button: 'Choose count', sections: [{ title: 'Sessions', rows }] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending attended count picker:', e.response?.data || e.message);
   }
 }
 
@@ -1259,19 +1423,9 @@ app.get('/health/db', async (req, res) => {
   }
 });
 
-app.get('/debug/env', (req, res) => {
-  const mask = (v) => (v && v.length > 6 ? v.slice(0, 3) + '***' + v.slice(-3) : !!v);
-  res.json({
-    supabaseUrlSet: !!process.env.SUPABASE_URL,
-    supabaseServiceRoleSet: !!process.env.SUPABASE_SERVICE_ROLE,
-    supabaseAnonSet: !!process.env.SUPABASE_KEY,
-    phoneNumberId: mask(process.env.PHONE_NUMBER_ID || ''),
-  });
-});
-
 app.post('/internal/reminders', async (req, res) => {
   try {
-    const token = req.headers['x-reminder-token'] || req.query.token;
+    const token = req.headers['x-reminder-token'];
     if (!token || token !== process.env.REMINDER_TOKEN) return res.sendStatus(401);
     const { runOnce } = require('./reminder');
     await runOnce();

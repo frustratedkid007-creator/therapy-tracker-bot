@@ -82,3 +82,11 @@ CREATE TABLE child_members (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   UNIQUE(child_id, member_phone)
 );
+
+CREATE TABLE processed_inbound_messages (
+  id BIGSERIAL PRIMARY KEY,
+  message_id TEXT UNIQUE NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_processed_inbound_messages_created_at ON processed_inbound_messages(created_at);
