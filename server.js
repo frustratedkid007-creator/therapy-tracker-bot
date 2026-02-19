@@ -275,6 +275,23 @@ async function handleMessage(userPhone, message) {
       await sendMessage(userPhone, 'Type range as YYYY-MM-DD..YYYY-MM-DD');
     } else if (message === 'setup_other') {
       await handleSetup(userPhone);
+    } else if (message === 'settings_timezone') {
+      await sendTimezonePicker(userPhone);
+    } else if (message.startsWith('tz:')) {
+      const tz = message.slice(3);
+      await supabase.from('users').update({ timezone: tz }).eq('phone', userPhone);
+      await sendMessage(userPhone, `✅ Timezone updated\n🌍 ${tz}`);
+      await sendQuickMenu(userPhone);
+    } else if (message === 'settings_reminders') {
+      await sendRemindersPicker(userPhone);
+    } else if (message === 'reminders_on') {
+      await supabase.from('users').update({ reminders_enabled: true }).eq('phone', userPhone);
+      await sendMessage(userPhone, `✅ Reminders ON`);
+      await sendQuickMenu(userPhone);
+    } else if (message === 'reminders_off') {
+      await supabase.from('users').update({ reminders_enabled: false }).eq('phone', userPhone);
+      await sendMessage(userPhone, `✅ Reminders OFF`);
+      await sendQuickMenu(userPhone);
     } else if (message === 'setup_fresh') {
       await sendSetupPresets(userPhone);
       const { error: setWaitErr } = await supabase
@@ -1035,6 +1052,8 @@ async function sendMoreMenu(to) {
             ]},
             { title: 'Settings', rows: [
               { id: 'setup_other', title: 'Update configuration' },
+              { id: 'settings_timezone', title: 'Timezone' },
+              { id: 'settings_reminders', title: 'Reminders' },
               { id: 'setup_fresh', title: 'Setup • Start Fresh' },
               { id: 'setup_mid', title: 'Setup • Start Mid‑Month' },
               { id: 'reset', title: 'Reset month' }
@@ -1045,6 +1064,59 @@ async function sendMoreMenu(to) {
     }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
   } catch (e) {
     console.error('Error sending more menu:', e.response?.data || e.message);
+  }
+}
+
+async function sendTimezonePicker(to) {
+  try {
+    const { data: u } = await supabase.from('users').select('*').eq('phone', to).single();
+    const current = (u && typeof u.timezone === 'string' && u.timezone) ? u.timezone : DEFAULT_TIMEZONE;
+    const rows = [
+      { id: 'tz:Asia/Kolkata', title: 'Asia/Kolkata' },
+      { id: 'tz:Asia/Dubai', title: 'Asia/Dubai' },
+      { id: 'tz:Europe/London', title: 'Europe/London' },
+      { id: 'tz:America/New_York', title: 'America/New_York' },
+      { id: 'tz:America/Los_Angeles', title: 'America/Los_Angeles' },
+      { id: 'tz:Australia/Sydney', title: 'Australia/Sydney' },
+      { id: 'tz:Etc/UTC', title: 'Etc/UTC' }
+    ];
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: 'Timezone' },
+        body: { text: `Current: ${current}\nChoose your timezone` },
+        action: { button: 'Choose', sections: [{ title: 'Timezones', rows }] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending timezone picker:', e.response?.data || e.message);
+  }
+}
+
+async function sendRemindersPicker(to) {
+  try {
+    const { data: u } = await supabase.from('users').select('*').eq('phone', to).single();
+    const enabled = u?.reminders_enabled !== false;
+    const rows = [
+      { id: 'reminders_on', title: 'ON' },
+      { id: 'reminders_off', title: 'OFF' }
+    ];
+    await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: { type: 'text', text: 'Reminders' },
+        body: { text: `Current: ${enabled ? 'ON' : 'OFF'}\nChoose an option` },
+        action: { button: 'Choose', sections: [{ title: 'Reminders', rows }] }
+      }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('Error sending reminders picker:', e.response?.data || e.message);
   }
 }
 
