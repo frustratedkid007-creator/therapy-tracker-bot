@@ -453,19 +453,23 @@ async function handleStatus(userPhone, user, tenantId) {
   const { today, month } = nowPartsInTimeZone(user && typeof user.timezone === 'string' ? user.timezone : config.DEFAULT_TIMEZONE);
   const stats = await loadMonthlyStats(userPhone, tenantId, month);
   if (!stats) {
-    await sendMessage(userPhone, `No setup found for ${month}. Type setup to begin.`);
+    await sendMessage(userPhone, `⚙️ No setup found for ${month}.\nType setup to begin.`);
     await sendQuickMenu(userPhone, tenantId);
     return;
   }
   const { configRow, attended, cancelled, totalSessions, remaining } = stats;
+  const monthLabel = new Date(`${month}-01T00:00:00Z`).toLocaleDateString('en-IN', {
+    month: 'long',
+    year: 'numeric'
+  });
   await sendMessage(
     userPhone,
-    `STATUS ${month}\n` +
-    `Today: ${today}\n` +
-    `Attended: ${attended}/${totalSessions}\n` +
-    `Missed: ${cancelled}\n` +
-    `Remaining: ${remaining}\n` +
-    `Rate: INR ${configRow.cost_per_session || 0}`
+    `📊 STATUS - ${monthLabel}\n` +
+    `📅 Today: ${today}\n` +
+    `✅ Attended: ${attended}/${totalSessions}\n` +
+    `❌ Missed: ${cancelled}\n` +
+    `🎯 Remaining: ${remaining}\n` +
+    `💸 Rate: INR ${configRow.cost_per_session || 0}`
   );
   await sendQuickMenu(userPhone, tenantId);
 }
@@ -516,13 +520,13 @@ async function handleWeekly(userPhone, user, tenantId) {
     : 'Set reminder + backup slot to reduce missed sessions.';
   await sendMessage(
     userPhone,
-    `WEEKLY INSIGHTS (${currentMonth})\n` +
+    `📈 WEEKLY INSIGHTS (${currentMonth})\n` +
     `${timeline}\n` +
-    `Attended: ${attended}\n` +
-    `Missed: ${missed}\n` +
-    `Consistency: ${consistency}%\n` +
-    `${topReason ? `Top miss reason: ${topReason[0]}` : 'No miss reasons this week'}\n` +
-    `Tip: ${tip}`
+    `✅ Attended: ${attended}\n` +
+    `❌ Missed: ${missed}\n` +
+    `🎯 Consistency: ${consistency}%\n` +
+    `${topReason ? `📝 Top miss reason: ${topReason[0]}` : '📝 No miss reasons this week'}\n` +
+    `💡 Tip: ${tip}`
   );
   await sendQuickMenu(userPhone, tenantId);
 }

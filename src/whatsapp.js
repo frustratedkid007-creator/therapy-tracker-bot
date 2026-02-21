@@ -98,12 +98,17 @@ async function sendQuickMenu(to, tenantId) {
     let hasConfig = false;
     const cfgMatch = tenantId ? { tenant_id: tenantId, user_phone: to } : { user_phone: to };
     const { data: cfg } = await supabase.from('monthly_config').select('*').match(cfgMatch).eq('month', month).single();
+    const monthLabel = new Date(`${month}-01T00:00:00Z`).toLocaleDateString('en-IN', {
+      month: 'short',
+      year: 'numeric'
+    });
     if (cfg) {
       hasConfig = true;
       const { data: ss } = await supabase.from('sessions').select('*').match(cfgMatch).eq('month', month);
       const lst = Array.isArray(ss) ? ss : [];
       const att = lst.filter(s => s.status === 'attended').length;
       const totalSessions = (cfg.paid_sessions || 0) + (cfg.carry_forward || 0);
+      const remaining = Math.max(0, totalSessions - att);
       const days = lastNDatesFromToday(today, 30);
       const recentMatch = tenantId ? { tenant_id: tenantId, user_phone: to } : { user_phone: to };
       const { data: recent } = await supabase
@@ -117,12 +122,21 @@ async function sendQuickMenu(to, tenantId) {
         if (attendedSet.has(d)) streak += 1;
         else break;
       }
-      const streakText = streak > 0 ? `${streak} day streak` : 'No streak yet';
-      stats = `${month} | ${att}/${totalSessions} attended | ${streakText}`;
+      const streakText = streak > 0 ? `${streak} day streak` : 'Start your streak';
+      stats =
+        `📅 ${monthLabel} snapshot\n` +
+        `✅ Attended: ${att}/${totalSessions}\n` +
+        `🎯 Remaining: ${remaining}\n` +
+        `🔥 Streak: ${streakText}`;
     } else {
-      stats = `${month} | setup pending`;
+      stats =
+        `📅 ${monthLabel} snapshot\n` +
+        `⚙️ Setup pending\n` +
+        `💡 Example: 16 800 0`;
     }
-    const promptText = hasConfig ? 'What would you like to do?' : 'Setup required before logging sessions.';
+    const promptText = hasConfig
+      ? 'What would you like to log now?'
+      : 'Complete setup once, then start session tracking.';
     const primaryButtons = hasConfig
       ? [
           { type: 'reply', reply: { id: 'attended', title: 'Attended' } },
@@ -140,7 +154,7 @@ async function sendQuickMenu(to, tenantId) {
       type: 'interactive',
       interactive: {
         type: 'button',
-        body: { text: `${stats}\n${promptText}` },
+        body: { text: `${stats}\n\n${promptText}` },
         action: {
           buttons: primaryButtons
         }
@@ -157,7 +171,7 @@ async function sendQuickMenu(to, tenantId) {
       type: 'interactive',
       interactive: {
         type: 'button',
-        body: { text: 'Quick actions' },
+        body: { text: '⚡ Quick actions' },
         action: {
           buttons: [
             { type: 'reply', reply: { id: 'status', title: 'Status' } },
@@ -186,28 +200,35 @@ async function sendMoreMenu(to) {
       interactive: {
         type: 'list',
         header: { type: 'text', text: 'More options' },
-        body: { text: 'Open tools and settings' },
+        body: { text: 'Choose a tracking or account action' },
         action: {
           button: 'Open',
           sections: [
-            { title: 'Tools', rows: [
+            { title: 'Tracking', rows: [
               { id: 'status', title: 'Current status' },
               { id: 'weekly', title: 'Weekly insights' },
               { id: 'summary', title: 'Monthly summary' },
               { id: 'download_report', title: 'Download report PDF' },
-              { id: 'undo', title: 'Undo last log' }
+              { id: 'undo', title: 'Undo last log' },
+              { id: 'backfill_attended', title: 'Backfill attended' },
+              { id: 'backfill_missed', title: 'Backfill missed' }
             ]},
             { title: 'Account', rows: [
               { id: 'setup_other', title: 'Update configuration' },
               { id: 'plan_status', title: 'Plan status' },
-              { id: 'go_pro', title: 'Upgrade plan' },
-              { id: 'export_data', title: 'Export my data' },
-              { id: 'consent_status', title: 'Consent status' }
+              { id: 'go_pro', title: 'Upgrade plan' }
             ]}
           ]
         }
       }
     }, { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+    await sendMessage(
+      to,
+      `🧩 More commands:\n` +
+      `holiday_range, plan_status, export_data, consent_status, members\n` +
+      `add_parent <phone>, add_therapist <phone>\n` +
+      `delete_my_data`
+    );
   } catch (e) {
     console.error('Error sending more menu:', e.response?.data || e.message);
   }
