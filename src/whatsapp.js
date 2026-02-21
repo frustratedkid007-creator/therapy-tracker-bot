@@ -192,19 +192,10 @@ async function sendQuickMenu(to, tenantId) {
 }
 
 async function sendMoreMenu(to) {
-  const commandsText =
-    `🧩 More commands:\n` +
-    `feedback, note_template, weekly_digest, missed_analytics\n` +
-    `streak, language, lang:en, lang:hi, lang:te\n` +
-    `theme, theme:sunrise, theme:ocean, theme:forest\n` +
-    `my_referral, redeem <code>, apply_coupon <code>\n` +
-    `holiday_range, reset, plan_status, export_data, consent_status, members\n` +
-    `attended_dates, attended_range, missed_dates, missed_range\n` +
-    `add_parent <phone>, add_therapist <phone>\n` +
-    `payment_status, reconcile_payment <payment_id>\n` +
-    `clinic_admin, admin_members, admin_risk\n` +
-    `accept_invite, reject_invite\n` +
-    `delete_my_data`;
+  const fallbackText =
+    `Could not open list menu on this device.\n` +
+    `Type one command:\n` +
+    `status, weekly, summary, feedback, plan_status`;
   try {
     // WhatsApp list messages support max 10 rows across sections.
     await axios.post(`https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`, {
@@ -238,10 +229,9 @@ async function sendMoreMenu(to) {
         }
       }
     }, { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
-    await sendMessage(to, commandsText);
   } catch (e) {
     console.error('Error sending more menu:', e.response?.data || e.message);
-    await sendMessage(to, commandsText);
+    await sendMessage(to, fallbackText);
   }
 }
 
