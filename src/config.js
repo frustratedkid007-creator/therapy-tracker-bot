@@ -10,6 +10,8 @@ function validateEnv() {
   if (process.env.NODE_ENV === 'production') {
     if (!hasServiceRoleKey) required.push('SUPABASE_SERVICE_ROLE');
     if (!allowInsecureTracker) required.push('TRACKER_SHARE_SECRET');
+    required.push('INTERNAL_REPORT_TOKEN');
+    required.push('REMINDER_TOKEN');
   }
   if (!enableTenantScoping && process.env.TENANT_ID) {
     console.warn('TENANT_ID is set but ENABLE_TENANT_SCOPING is false. TENANT_ID will be ignored.');
@@ -55,7 +57,12 @@ const config = {
   PRO_PLAN_DAYS: parseInt(process.env.PRO_PLAN_DAYS || '30', 10),
   GROQ_API_KEY: process.env.GROQ_API_KEY,
   USE_SARVAM: String(process.env.USE_SARVAM || '').toLowerCase() === 'true',
-  SARVAM_API_KEY: process.env.SARVAM_API_KEY
+  SARVAM_API_KEY: process.env.SARVAM_API_KEY,
+  MAX_JSON_BODY_KB: parseInt(process.env.MAX_JSON_BODY_KB || '256', 10),
+  REQUEST_LOGGING: String(process.env.REQUEST_LOGGING || '').toLowerCase() !== 'false',
+  WEBHOOK_RATE_LIMIT_PER_MIN: parseInt(process.env.WEBHOOK_RATE_LIMIT_PER_MIN || '120', 10),
+  RAZORPAY_RATE_LIMIT_PER_MIN: parseInt(process.env.RAZORPAY_RATE_LIMIT_PER_MIN || '60', 10),
+  TRACKER_WRITE_RATE_LIMIT_PER_MIN: parseInt(process.env.TRACKER_WRITE_RATE_LIMIT_PER_MIN || '90', 10)
 };
 
 module.exports = { config };

@@ -207,17 +207,32 @@ async function sendMoreMenu(to) {
             { title: 'Tracking', rows: [
               { id: 'status', title: 'Current status' },
               { id: 'weekly', title: 'Weekly insights' },
+              { id: 'weekly_digest', title: 'Parent digest' },
               { id: 'summary', title: 'Monthly summary' },
+              { id: 'missed_analytics', title: 'Missed analytics' },
+              { id: 'streak', title: 'Streak journey' },
               { id: 'download_report', title: 'Download report PDF' },
               { id: 'feedback_note', title: 'Therapy notes (voice)' },
+              { id: 'note_template', title: 'Structured note' }
+            ]},
+            { title: 'Logging tools', rows: [
               { id: 'undo', title: 'Undo last log' },
-              { id: 'backfill_attended', title: 'Backfill attended' }
+              { id: 'backfill_attended', title: 'Backfill attended' },
+              { id: 'backfill_missed', title: 'Backfill missed' },
+              { id: 'bulk_log_help', title: 'Bulk log dates' },
+              { id: 'reset_month', title: 'Reset this month' }
             ]},
             { title: 'Account', rows: [
               { id: 'setup_other', title: 'Update configuration' },
               { id: 'plan_status', title: 'Plan status' },
+              { id: 'payment_status', title: 'Payment status' },
               { id: 'go_pro', title: 'Upgrade plan' },
-              { id: 'invite_member', title: 'Invite parent/therapist' }
+              { id: 'invite_member', title: 'Invite parent/therapist' },
+              { id: 'members', title: 'Members list' },
+              { id: 'clinic_admin', title: 'Clinic admin' },
+              { id: 'language', title: 'Language' },
+              { id: 'theme', title: 'Theme style' },
+              { id: 'my_referral', title: 'Referral code' }
             ]}
           ]
         }
@@ -226,8 +241,16 @@ async function sendMoreMenu(to) {
     await sendMessage(
       to,
       `🧩 More commands:\n` +
-      `feedback, holiday_range, plan_status, export_data, consent_status, members\n` +
+      `feedback, note_template, weekly_digest, missed_analytics\n` +
+      `streak, language, lang:en, lang:hi, lang:te\n` +
+      `theme, theme:sunrise, theme:ocean, theme:forest\n` +
+      `my_referral, redeem <code>, apply_coupon <code>\n` +
+      `holiday_range, reset, plan_status, export_data, consent_status, members\n` +
+      `attended_dates, attended_range, missed_dates, missed_range\n` +
       `add_parent <phone>, add_therapist <phone>\n` +
+      `payment_status, reconcile_payment <payment_id>\n` +
+      `clinic_admin, admin_members, admin_risk\n` +
+      `accept_invite, reject_invite\n` +
       `delete_my_data`
     );
   } catch (e) {
@@ -254,6 +277,34 @@ async function sendInviteTypePicker(to) {
     }, { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
   } catch (error) {
     console.error('Error sending invite picker:', error.response?.data || error.message);
+  }
+}
+
+async function sendInviteDecisionPicker(to, role) {
+  try {
+    const roleLabel = String(role || 'member').trim().toLowerCase();
+    const readableRole = roleLabel === 'therapist' ? 'therapist' : (roleLabel === 'parent' ? 'parent' : 'member');
+    await axios.post(`https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: {
+          text:
+            `You have been invited as ${readableRole}.\n` +
+            `Do you want to join this child tracker?`
+        },
+        action: {
+          buttons: [
+            { type: 'reply', reply: { id: 'invite_accept', title: 'Accept' } },
+            { type: 'reply', reply: { id: 'invite_reject', title: 'Reject' } }
+          ]
+        }
+      }
+    }, { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (error) {
+    console.error('Error sending invite decision picker:', error.response?.data || error.message);
   }
 }
 
@@ -691,6 +742,7 @@ module.exports = {
   sendYesNo,
   sendProUpsell,
   sendInviteTypePicker,
+  sendInviteDecisionPicker,
   sendVoiceNotePrompt,
   sendMoodPicker
 };
