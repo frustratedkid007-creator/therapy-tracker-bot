@@ -40,6 +40,7 @@ const config = {
   ENABLE_TENANT_SCOPING: String(process.env.ENABLE_TENANT_SCOPING || '').toLowerCase() === 'true',
   WHATSAPP_TOKEN: process.env.WHATSAPP_TOKEN,
   PHONE_NUMBER_ID: process.env.PHONE_NUMBER_ID,
+  WHATSAPP_PUBLIC_NUMBER: process.env.WHATSAPP_PUBLIC_NUMBER || '',
   VERIFY_TOKEN: process.env.VERIFY_TOKEN || 'therapy_tracker_2025',
   WHATSAPP_APP_SECRET: process.env.WHATSAPP_APP_SECRET,
   DEFAULT_TIMEZONE: process.env.DEFAULT_TIMEZONE || 'Asia/Kolkata',

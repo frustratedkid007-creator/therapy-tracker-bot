@@ -22,8 +22,10 @@ async function sendMessage(to, text) {
       }
     );
     console.log(`Message sent to ${to}`);
+    return { ok: true };
   } catch (error) {
     console.error('Error sending message:', error.response?.data || error.message);
+    return { ok: false, error: error.response?.data || error.message };
   }
 }
 
@@ -263,10 +265,20 @@ async function sendInviteTypePicker(to) {
   }
 }
 
-async function sendInviteDecisionPicker(to, role) {
+async function sendInviteDecisionPicker(to, role, context = {}) {
   try {
     const roleLabel = String(role || 'member').trim().toLowerCase();
     const readableRole = roleLabel === 'therapist' ? 'therapist' : (roleLabel === 'parent' ? 'parent' : 'member');
+    const childName = String(context.childName || '').trim();
+    const inviter = String(context.inviterPhone || '').trim();
+    const consentLine = 'By accepting, you consent to receive session updates on WhatsApp for this child.';
+    const lines = [
+      `You are invited as ${readableRole}.`,
+      childName ? `Child: ${childName}` : '',
+      inviter ? `Invited by: ${inviter}` : '',
+      consentLine,
+      'Do you want to join this tracker?'
+    ].filter(Boolean);
     await axios.post(`https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp',
       to,
@@ -274,9 +286,7 @@ async function sendInviteDecisionPicker(to, role) {
       interactive: {
         type: 'button',
         body: {
-          text:
-            `You have been invited as ${readableRole}.\n` +
-            `Do you want to join this child tracker?`
+          text: lines.join('\n')
         },
         action: {
           buttons: [
@@ -286,8 +296,10 @@ async function sendInviteDecisionPicker(to, role) {
         }
       }
     }, { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+    return { ok: true };
   } catch (error) {
     console.error('Error sending invite decision picker:', error.response?.data || error.message);
+    return { ok: false, error: error.response?.data || error.message };
   }
 }
 
