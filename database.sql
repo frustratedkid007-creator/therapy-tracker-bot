@@ -7,6 +7,7 @@ CREATE TABLE users (
   waiting_for TEXT,
   timezone TEXT DEFAULT 'Asia/Kolkata',
   reminders_enabled BOOLEAN DEFAULT TRUE,
+  reminder_time_hour INTEGER DEFAULT 13,
   last_reminder_sent DATE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

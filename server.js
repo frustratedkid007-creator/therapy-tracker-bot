@@ -1,8 +1,13 @@
 const express = require('express');
 const axios = require('axios');
-const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
-require('dotenv').config();
+const FormData = require('form-data');
+const PDFDocument = require('pdfkit');
+const { config } = require('./src/config');
+const { supabase } = require('./src/db');
+const { verifyWebhookSignature: verifyWebhookSignatureModule, shouldProcessInboundMessage: shouldProcessInboundMessageModule } = require('./src/idempotency');
+const { handleMessage: handleMessageModule } = require('./src/handlers');
+const { sendDocument, sendMessage: sendWhatsAppMessage } = require('./src/whatsapp');
 
 const app = express();
 app.use(express.json({
@@ -11,40 +16,40 @@ app.use(express.json({
   }
 }));
 
-function validateEnv() {
-  const required = ['SUPABASE_URL', 'SUPABASE_KEY', 'WHATSAPP_TOKEN', 'PHONE_NUMBER_ID'];
-  if (process.env.NODE_ENV === 'production' && process.env.SKIP_WEBHOOK_SIGNATURE !== 'true') required.push('WHATSAPP_APP_SECRET');
-  const missing = required.filter((k) => !process.env[k] || process.env[k].trim() === '');
-  if (missing.length) {
-    console.error(`Missing environment variables: ${missing.join(', ')}`);
-    process.exit(1);
-  }
-  const url = process.env.SUPABASE_URL;
-  if (!/^https?:\/\//i.test(url)) {
-    console.error('Invalid SUPABASE_URL. It must start with http:// or https://');
-    process.exit(1);
-  }
-}
-
-validateEnv();
-
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_KEY;
-const supabase = createClient(process.env.SUPABASE_URL, supabaseKey);
-
 // WhatsApp configuration
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'therapy_tracker_2025';
-const WHATSAPP_APP_SECRET = process.env.WHATSAPP_APP_SECRET;
-const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || 'Asia/Kolkata';
-const processedMessageIds = new Map();
-const duplicateWindowMs = 5 * 60 * 1000;
+const WHATSAPP_TOKEN = config.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = config.PHONE_NUMBER_ID;
+const VERIFY_TOKEN = config.VERIFY_TOKEN;
+const WHATSAPP_APP_SECRET = config.WHATSAPP_APP_SECRET;
+const DEFAULT_TIMEZONE = config.DEFAULT_TIMEZONE;
 
 function safeEqual(a, b) {
   const aa = Buffer.from(a);
   const bb = Buffer.from(b);
   if (aa.length !== bb.length) return false;
   return crypto.timingSafeEqual(aa, bb);
+}
+
+function withTenant(tenantId, data) {
+  if (!config.ENABLE_TENANT_SCOPING || !tenantId) return data;
+  return { tenant_id: tenantId, ...data };
+}
+
+function userMatch(tenantId, phone) {
+  return withTenant(tenantId, { phone });
+}
+
+function userPhoneMatch(tenantId, phone) {
+  return withTenant(tenantId, { user_phone: phone });
+}
+
+function resolveTenantId(req, options = {}) {
+  if (!config.ENABLE_TENANT_SCOPING) return null;
+  const allowDefault = options.allowDefault !== false;
+  const direct = String(req.get('x-tenant-id') || req.query.tenant_id || req.query.tenant || '').trim();
+  if (direct) return direct;
+  if (!allowDefault) return null;
+  return String(config.PHONE_NUMBER_ID || 'default');
 }
 
 function verifyWebhookSignature(req) {
@@ -57,28 +62,165 @@ function verifyWebhookSignature(req) {
   return safeEqual(signature, expected);
 }
 
-function seenRecently(messageId) {
-  if (!messageId) return false;
-  const now = Date.now();
-  for (const [id, ts] of processedMessageIds.entries()) {
-    if (now - ts > duplicateWindowMs) processedMessageIds.delete(id);
-  }
-  if (processedMessageIds.has(messageId)) return true;
-  processedMessageIds.set(messageId, now);
-  return false;
+function toBase64Url(buffer) {
+  return Buffer.from(buffer)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
 }
 
-async function shouldProcessInboundMessage(messageId) {
-  if (!messageId) return true;
-  if (seenRecently(messageId)) return false;
+function signTrackerAccess(phone, tenantId, exp) {
+  const secret = config.TRACKER_SHARE_SECRET;
+  if (!secret) return '';
+  const payload = `${phone}|${tenantId || ''}|${exp}`;
+  return toBase64Url(crypto.createHmac('sha256', secret).update(payload).digest());
+}
+
+function verifyTrackerAccess(phone, tenantId, exp, sig) {
+  if (!config.TRACKER_SHARE_SECRET) return false;
+  const expected = signTrackerAccess(phone, tenantId, exp);
+  return safeEqual(expected, sig || '');
+}
+
+function maskPhone(phone) {
+  const p = String(phone || '');
+  if (p.length <= 4) return '****';
+  return `${'*'.repeat(Math.max(0, p.length - 4))}${p.slice(-4)}`;
+}
+
+function isProActiveUser(user) {
+  if (!user || user.is_pro !== true) return false;
+  if (!user.pro_expires_at) return true;
+  const t = Date.parse(user.pro_expires_at);
+  return Number.isFinite(t) && t > Date.now();
+}
+
+async function logConsentEvent(userPhone, tenantId, eventType, details = {}) {
   try {
-    const { error } = await supabase.from('processed_inbound_messages').insert({ message_id: messageId });
-    if (!error) return true;
-    if (String(error.code) === '23505') return false;
-    return true;
-  } catch {
-    return true;
+    if (!userPhone || !eventType) return;
+    const payload = withTenant(tenantId, {
+      user_phone: userPhone,
+      event_type: eventType,
+      details,
+      created_at: new Date().toISOString()
+    });
+    const { error } = await supabase.from('consent_events').insert(payload);
+    if (error && !/consent_events/i.test(error.message || '')) {
+      console.error('consent_events insert failed:', error.message);
+    }
+  } catch (_) {
   }
+}
+
+function phoneCandidates(rawPhone) {
+  const digits = String(rawPhone || '').replace(/\D/g, '');
+  if (!digits) return [];
+  const out = new Set([digits]);
+  if (digits.startsWith('91') && digits.length === 12) out.add(digits.slice(2));
+  if (digits.length === 10) out.add(`91${digits}`);
+  if (digits.startsWith('0') && digits.length > 10) out.add(digits.replace(/^0+/, ''));
+  return Array.from(out).filter(Boolean);
+}
+
+async function resolveExistingUserPhone(rawPhone, tenantId) {
+  const candidates = phoneCandidates(rawPhone);
+  if (!candidates.length) return '';
+  const match = withTenant(tenantId, {});
+  const { data, error } = await supabase
+    .from('users')
+    .select('phone')
+    .match(match)
+    .in('phone', candidates)
+    .limit(1);
+  if (error) {
+    console.error('users lookup by phone failed:', error.message);
+    return '';
+  }
+  return Array.isArray(data) && data[0]?.phone ? String(data[0].phone) : '';
+}
+
+async function claimPaymentEvent(eventKey, tenantId) {
+  if (!eventKey) return { ok: false, reason: 'missing_event_key' };
+  const row = withTenant(tenantId, { event_key: eventKey });
+  try {
+    const { error } = await supabase.from('processed_payment_events').insert(row);
+    if (!error) return { ok: true };
+    if (String(error.code) === '23505') return { ok: false, reason: 'duplicate' };
+    if (/processed_payment_events|event_key/i.test(error.message || '')) {
+      return { ok: false, reason: 'schema_missing' };
+    }
+    return { ok: false, reason: 'db_error', error };
+  } catch (e) {
+    return { ok: false, reason: 'exception', error: e };
+  }
+}
+
+async function releasePaymentEvent(eventKey, tenantId) {
+  if (!eventKey) return;
+  try {
+    await supabase
+      .from('processed_payment_events')
+      .delete()
+      .match(withTenant(tenantId, { event_key: eventKey }));
+  } catch (_) {
+  }
+}
+
+async function findPaymentLogByEventKey(eventKey, tenantId) {
+  if (!eventKey) return null;
+  try {
+    const { data, error } = await supabase
+      .from('subscription_payments')
+      .select('id,event_key,payment_id,status,plan_code,plan_days,paid_at')
+      .match(withTenant(tenantId, { event_key: eventKey }))
+      .limit(1);
+    if (error) {
+      if (/subscription_payments/i.test(error.message || '')) return null;
+      console.error('subscription_payments by event_key lookup failed:', error.message);
+      return null;
+    }
+    return Array.isArray(data) && data.length ? data[0] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function findPaymentLogByPaymentId(paymentId, tenantId) {
+  if (!paymentId) return null;
+  try {
+    const { data, error } = await supabase
+      .from('subscription_payments')
+      .select('id,event_key,payment_id,status,plan_code,plan_days,paid_at')
+      .match(withTenant(tenantId, { payment_id: paymentId }))
+      .limit(1);
+    if (error) {
+      if (/subscription_payments/i.test(error.message || '')) return null;
+      console.error('subscription_payments by payment_id lookup failed:', error.message);
+      return null;
+    }
+    return Array.isArray(data) && data.length ? data[0] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function parsePositiveInt(value, fallback, min = 1, max = 3650) {
+  const n = parseInt(String(value ?? ''), 10);
+  if (!Number.isInteger(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function normalizePlanCode(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+function inferPlanCode(notes, amountPaise) {
+  const explicit = normalizePlanCode(notes?.plan || notes?.plan_code || notes?.tier);
+  if (explicit) return explicit;
+  if (amountPaise === 19900) return 'parent_basic_199';
+  if (amountPaise === 49900) return 'pro_plus_499';
+  return 'pro_generic';
 }
 
 function nowPartsInTimeZone(timeZone) {
@@ -88,9 +230,10 @@ function nowPartsInTimeZone(timeZone) {
   return { today, month: today.slice(0, 7), timeZone: tz };
 }
 
-async function getUserTimeZone(userPhone) {
+async function getUserTimeZone(userPhone, tenantId) {
   try {
-    const { data: u } = await supabase.from('users').select('*').eq('phone', userPhone).single();
+    const match = tenantId ? { tenant_id: tenantId, phone: userPhone } : { phone: userPhone };
+    const { data: u } = await supabase.from('users').select('*').match(match).single();
     return (u && typeof u.timezone === 'string' && u.timezone) ? u.timezone : DEFAULT_TIMEZONE;
   } catch (_) {
     return DEFAULT_TIMEZONE;
@@ -106,6 +249,380 @@ function lastNDatesFromToday(todayStr, n) {
     out.push(d.toISOString().slice(0, 10));
   }
   return out;
+}
+
+function buildChartConfig(attended, cancelled, remaining) {
+  return {
+    type: 'doughnut',
+    data: {
+      labels: ['Attended', 'Missed', 'Remaining'],
+      datasets: [{
+        data: [attended, cancelled, Math.max(0, remaining)],
+        backgroundColor: ['#22c55e', '#ef4444', '#3b82f6']
+      }]
+    },
+    options: {
+      plugins: { legend: { display: true, position: 'bottom' } },
+      cutout: '60%'
+    }
+  };
+}
+
+function buildMonthlyStats(configRow, sessions) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const attended = list.filter(s => s.status === 'attended').length;
+  const cancelled = list.filter(s => s.status === 'cancelled').length;
+  const totalSessions = (configRow.paid_sessions || 0) + (configRow.carry_forward || 0);
+  const remaining = totalSessions - attended;
+  const amountUsed = Math.max(0, Math.min(attended, configRow.paid_sessions || 0)) * (configRow.cost_per_session || 0);
+  const amountCancelled = Math.max(0, Math.min(cancelled, Math.max((configRow.paid_sessions || 0) - Math.min(attended, configRow.paid_sessions || 0), 0))) * (configRow.cost_per_session || 0);
+  const bufferSessions = Math.max(0, totalSessions - attended - cancelled);
+  const bufferValue = bufferSessions * (configRow.cost_per_session || 0);
+  return { attended, cancelled, remaining, amountUsed, amountCancelled, bufferValue, totalSessions };
+}
+
+async function buildMonthlyReportPdf({ phone, month, monthName, stats, chartBuffer, configRow }) {
+  const doc = new PDFDocument({ size: 'A4', margin: 40 });
+  const chunks = [];
+  const done = new Promise((resolve, reject) => {
+    doc.on('end', resolve);
+    doc.on('error', reject);
+  });
+  doc.on('data', (c) => chunks.push(c));
+  doc.fontSize(20).text(`Therapy Tracker • ${monthName} Summary`);
+  doc.moveDown(0.5);
+  doc.fontSize(11).text(`Phone: ${phone}`);
+  doc.fontSize(11).text(`Month: ${month}`);
+  doc.moveDown();
+  const chartWidth = 360;
+  const x = (doc.page.width - chartWidth) / 2;
+  doc.image(chartBuffer, x, doc.y, { width: chartWidth });
+  doc.moveDown(12);
+  doc.fontSize(14).text('Payment');
+  doc.fontSize(11).text(`Paid sessions: ${configRow.paid_sessions || 0}`);
+  doc.fontSize(11).text(`Carry forward: ${configRow.carry_forward || 0}`);
+  doc.fontSize(11).text(`Rate: ₹${configRow.cost_per_session || 0}/session`);
+  doc.fontSize(11).text(`Total paid: ₹${(configRow.paid_sessions || 0) * (configRow.cost_per_session || 0)}`);
+  doc.moveDown();
+  doc.fontSize(14).text('Attendance');
+  doc.fontSize(11).text(`Attended: ${stats.attended} (₹${stats.amountUsed})`);
+  doc.fontSize(11).text(`Missed: ${stats.cancelled} (₹${stats.amountCancelled})`);
+  doc.fontSize(11).text(`Remaining: ${Math.max(0, stats.remaining)} sessions`);
+  doc.moveDown();
+  doc.fontSize(14).text('Cost Breakdown');
+  doc.fontSize(11).text(`Used: ₹${stats.amountUsed}`);
+  doc.fontSize(11).text(`Buffer: ₹${stats.bufferValue}`);
+  doc.end();
+  await done;
+  return Buffer.concat(chunks);
+}
+
+app.get('/internal/monthly-report', async (req, res) => {
+  try {
+    const token = req.get('x-internal-token') || req.query.token;
+    if (!config.INTERNAL_REPORT_TOKEN || token !== config.INTERNAL_REPORT_TOKEN) {
+      res.sendStatus(401);
+      return;
+    }
+    const tenantId = resolveTenantId(req, { allowDefault: false });
+    if (config.ENABLE_TENANT_SCOPING && !tenantId) {
+      res.status(400).json({ ok: false, error: 'Missing tenant_id' });
+      return;
+    }
+    let users = [];
+    let error = null;
+    ({ data: users, error } = await supabase
+      .from('users')
+      .select('phone,timezone,is_pro,pro_expires_at')
+      .match(withTenant(tenantId, {})));
+    if (error && /is_pro|pro_expires_at/i.test(error.message || '')) {
+      res.status(409).json({ ok: false, error: 'users.is_pro/users.pro_expires_at missing. Run database_hardening.sql.' });
+      return;
+    }
+    if (error) {
+      console.error('Supabase users select error:', error.message);
+      res.status(500).json({ ok: false, error: 'db' });
+      return;
+    }
+    let sent = 0;
+    let skipped = 0;
+    for (const user of (users || []).filter((u) => isProActiveUser(u))) {
+      const phone = user?.phone;
+      if (!phone) {
+        skipped += 1;
+        continue;
+      }
+      const tz = user?.timezone || DEFAULT_TIMEZONE;
+      const { month } = nowPartsInTimeZone(tz);
+      const { data: configRow } = await supabase
+        .from('monthly_config')
+        .select('*')
+        .match(userPhoneMatch(tenantId, phone))
+        .eq('month', month)
+        .single();
+      if (!configRow) {
+        skipped += 1;
+        continue;
+      }
+      const { data: sessions } = await supabase
+        .from('sessions')
+        .select('*')
+        .match(userPhoneMatch(tenantId, phone))
+        .eq('month', month);
+      const stats = buildMonthlyStats(configRow, sessions);
+      const dt = new Date(month + '-01');
+      const monthName = dt.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }).toUpperCase();
+      const chartConfig = buildChartConfig(stats.attended, stats.cancelled, stats.remaining);
+      const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}`;
+      const chartRes = await axios.get(chartUrl, { responseType: 'arraybuffer' });
+      const chartBuffer = Buffer.from(chartRes.data);
+      const pdfBuffer = await buildMonthlyReportPdf({
+        phone,
+        month,
+        monthName,
+        stats,
+        chartBuffer,
+        configRow
+      });
+      const filename = `Therapy-Report-${month}.pdf`;
+      await sendDocument(phone, pdfBuffer, filename, `${monthName} Summary`);
+      sent += 1;
+    }
+    res.status(200).json({ ok: true, sent, skipped });
+  } catch (e) {
+    console.error('monthly-report error:', e.message);
+    res.status(500).json({ ok: false });
+  }
+});
+
+app.get('/internal/tracker-link', async (req, res) => {
+  try {
+    const token = req.get('x-internal-token') || req.query.token;
+    if (!config.INTERNAL_REPORT_TOKEN || token !== config.INTERNAL_REPORT_TOKEN) {
+      res.sendStatus(401);
+      return;
+    }
+    if (!config.TRACKER_SHARE_SECRET) {
+      res.status(500).json({ ok: false, error: 'TRACKER_SHARE_SECRET not configured' });
+      return;
+    }
+    const phone = String(req.query.phone || '').trim();
+    if (!phone) {
+      res.status(400).json({ ok: false, error: 'Missing phone' });
+      return;
+    }
+    const tenantId = resolveTenantId(req, { allowDefault: false });
+    if (config.ENABLE_TENANT_SCOPING && !tenantId) {
+      res.status(400).json({ ok: false, error: 'Missing tenant_id' });
+      return;
+    }
+    const requestedTtl = parseInt(String(req.query.ttl_sec || config.TRACKER_LINK_TTL_SEC || 900), 10);
+    const ttlSec = Number.isInteger(requestedTtl) ? Math.max(60, Math.min(requestedTtl, 7 * 24 * 60 * 60)) : 900;
+    const exp = Math.floor(Date.now() / 1000) + ttlSec;
+    const sig = signTrackerAccess(phone, tenantId, exp);
+    const params = new URLSearchParams({
+      phone,
+      exp: String(exp),
+      sig
+    });
+    if (tenantId) params.set('tenant', tenantId);
+    const host = req.get('host');
+    const baseUrl = `${req.protocol}://${host}`;
+    const expiresAt = new Date(exp * 1000).toISOString();
+    await logConsentEvent(phone, tenantId, 'share_link_generated', {
+      ttl_sec: ttlSec,
+      expires_at: expiresAt
+    });
+    res.status(200).json({
+      ok: true,
+      url: `${baseUrl}/mytracker?${params.toString()}`,
+      expires_at: expiresAt
+    });
+  } catch (e) {
+    console.error('tracker-link error:', e.message);
+    res.status(500).json({ ok: false });
+  }
+});
+
+app.get('/mytracker', async (req, res) => {
+  try {
+    const phone = String(req.query.phone || '').trim();
+    if (!phone) {
+      res.status(400).send('Missing phone');
+      return;
+    }
+    const allowInsecure = config.ALLOW_INSECURE_TRACKER === true;
+    if (!allowInsecure) {
+      if (!config.TRACKER_SHARE_SECRET) {
+        res.status(503).send('Tracker access is not configured');
+        return;
+      }
+      const sig = String(req.query.sig || '');
+      const exp = parseInt(String(req.query.exp || ''), 10);
+      const tenantFromQuery = config.ENABLE_TENANT_SCOPING ? String(req.query.tenant || '').trim() : null;
+      if (config.ENABLE_TENANT_SCOPING && !tenantFromQuery) {
+        res.status(400).send('Missing tenant');
+        return;
+      }
+      if (!sig || !Number.isInteger(exp)) {
+        res.status(401).send('Missing tracker signature');
+        return;
+      }
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (exp < nowSec || exp > nowSec + (7 * 24 * 60 * 60)) {
+        res.status(401).send('Tracker link expired');
+        return;
+      }
+      if (!verifyTrackerAccess(phone, tenantFromQuery, exp, sig)) {
+        res.status(401).send('Invalid tracker signature');
+        return;
+      }
+    }
+    const tenantId = config.ENABLE_TENANT_SCOPING ? String(req.query.tenant || '').trim() : null;
+    if (config.ENABLE_TENANT_SCOPING && !tenantId) {
+      res.status(400).send('Missing tenant');
+      return;
+    }
+    await logConsentEvent(phone, tenantId, 'share_link_opened', {
+      path: '/mytracker'
+    });
+    const tz = await getUserTimeZone(phone, tenantId);
+    const { month } = nowPartsInTimeZone(tz);
+    const { data: configRow } = await supabase
+      .from('monthly_config')
+      .select('*')
+      .match(userPhoneMatch(tenantId, phone))
+      .eq('month', month)
+      .single();
+    if (!configRow) {
+      res.status(404).send('No config for this month');
+      return;
+    }
+    const { data: sessions } = await supabase
+      .from('sessions')
+      .select('*')
+      .match(userPhoneMatch(tenantId, phone))
+      .eq('month', month);
+    const list = Array.isArray(sessions) ? sessions : [];
+    const attended = list.filter(s => s.status === 'attended').length;
+    const cancelled = list.filter(s => s.status === 'cancelled').length;
+    const totalSessions = (configRow.paid_sessions || 0) + (configRow.carry_forward || 0);
+    const remaining = Math.max(0, totalSessions - attended);
+    const safePhone = phone.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Therapy Tracker</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; color: #0f172a; }
+    .card { max-width: 720px; margin: 0 auto; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 16px; }
+    .stat { padding: 12px; border: 1px solid #e2e8f0; border-radius: 10px; text-align: center; }
+    h1 { margin: 0 0 8px 0; }
+    canvas { max-width: 420px; margin: 16px auto; display: block; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="card">
+    <h1>Therapy Tracker</h1>
+    <div>Phone: ${safePhone}</div>
+    <div>Month: ${month}</div>
+    <div class="stats">
+      <div class="stat"><div>Attended</div><strong>${attended}</strong></div>
+      <div class="stat"><div>Missed</div><strong>${cancelled}</strong></div>
+      <div class="stat"><div>Remaining</div><strong>${remaining}</strong></div>
+    </div>
+    <canvas id="chart" width="400" height="400"></canvas>
+  </div>
+  <script>
+    const ctx = document.getElementById('chart').getContext('2d');
+    new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: ['Attended', 'Missed', 'Remaining'],
+        datasets: [{
+          data: [${attended}, ${cancelled}, ${remaining}],
+          backgroundColor: ['#22c55e', '#ef4444', '#3b82f6']
+        }]
+      },
+      options: {
+        plugins: { legend: { position: 'bottom' } },
+        cutout: '60%'
+      }
+    });
+  </script>
+</body>
+</html>`;
+    res.setHeader('Content-Type', 'text/html');
+    res.status(200).send(html);
+  } catch (e) {
+    console.error('Error rendering /mytracker:', e.message);
+    res.status(500).send('Something went wrong');
+  }
+});
+
+async function fetchMediaInfo(mediaId) {
+  const { data } = await axios.get(`https://graph.facebook.com/v18.0/${mediaId}`, {
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+  });
+  return data || {};
+}
+
+async function downloadMediaBuffer(mediaId) {
+  const info = await fetchMediaInfo(mediaId);
+  const url = info?.url;
+  if (!url) return { buffer: Buffer.alloc(0), mimeType: info?.mime_type };
+  const mediaRes = await axios.get(url, {
+    responseType: 'arraybuffer',
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+  });
+  return { buffer: Buffer.from(mediaRes.data || []), mimeType: info?.mime_type };
+}
+
+async function transcribeWithGroq(buffer, mimeType) {
+  const key = config.GROQ_API_KEY;
+  if (!key) return '';
+  try {
+    const form = new FormData();
+    form.append('file', buffer, { filename: 'audio', contentType: mimeType || 'audio/ogg' });
+    form.append('model', 'whisper-large-v3');
+    const { data } = await axios.post(
+      'https://api.groq.com/openai/v1/audio/transcriptions',
+      form,
+      { headers: { Authorization: `Bearer ${key}`, ...form.getHeaders() } }
+    );
+    return (data && data.text) ? String(data.text) : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+async function transcribeWithSarvam(buffer, mimeType) {
+  const key = config.SARVAM_API_KEY;
+  if (!key) return '';
+  try {
+    const form = new FormData();
+    form.append('file', buffer, { filename: 'audio', contentType: mimeType || 'audio/ogg' });
+    const { data } = await axios.post(
+      'https://api.sarvam.ai/speech-to-text',
+      form,
+      { headers: { 'api-subscription-key': key, ...form.getHeaders() } }
+    );
+    if (data && typeof data.transcript === 'string') return data.transcript.trim();
+    if (data && typeof data.text === 'string') return data.text.trim();
+    return '';
+  } catch (_) {
+    return '';
+  }
+}
+
+async function transcribeAudio(buffer, mimeType) {
+  if (!buffer || !buffer.length) return '';
+  if (config.USE_SARVAM) return await transcribeWithSarvam(buffer, mimeType);
+  return await transcribeWithGroq(buffer, mimeType);
 }
 
 // Webhook verification (required by Meta)
@@ -125,7 +642,7 @@ app.get('/webhook', (req, res) => {
 // Receive messages
 app.post('/webhook', async (req, res) => {
   try {
-    if (!verifyWebhookSignature(req)) {
+    if (!verifyWebhookSignatureModule(req)) {
       res.sendStatus(403);
       return;
     }
@@ -135,25 +652,36 @@ app.post('/webhook', async (req, res) => {
       const entry = body.entry?.[0];
       const changes = entry?.changes?.[0];
       const value = changes?.value;
+      const tenantId = config.ENABLE_TENANT_SCOPING
+        ? String(value?.metadata?.phone_number_id || config.PHONE_NUMBER_ID || 'default')
+        : null;
       
       if (value?.messages?.[0]) {
         const message = value.messages[0];
-        const ok = await shouldProcessInboundMessage(message.id);
+        const ok = await shouldProcessInboundMessageModule(message.id, tenantId);
         if (!ok) {
           res.sendStatus(200);
           return;
         }
         const from = message.from;
-        let messageBody = (message.text?.body || '').toLowerCase().trim();
+        let messageBody = (message.text?.body || '').trim();
         if (message.type === 'interactive') {
           const bid = message.interactive?.button_reply?.id || message.interactive?.list_reply?.id || '';
           if (bid) messageBody = bid.toLowerCase();
+        } else if (message.type === 'audio') {
+          const mediaId = message.audio?.id;
+          const audio = mediaId ? await downloadMediaBuffer(mediaId) : { buffer: Buffer.alloc(0), mimeType: undefined };
+          const transcript = await transcribeAudio(audio.buffer, audio.mimeType);
+          const note = (transcript || '').trim();
+          messageBody = `voice_note:${note}`;
+        } else {
+          messageBody = messageBody.toLowerCase();
         }
         
-        console.log(`Message from ${from}: ${messageBody}`);
+        console.log(`Inbound message type=${message.type} from=${maskPhone(from)}`);
         
         // Process the message
-        await handleMessage(from, messageBody);
+        await handleMessageModule(from, messageBody, tenantId);
       } else {
         const hasStatuses = Array.isArray(value?.statuses) && value.statuses.length > 0;
         console.log('Webhook event received but no messages array; statuses:', hasStatuses ? JSON.stringify(value.statuses) : 'none');
@@ -164,6 +692,220 @@ app.post('/webhook', async (req, res) => {
   } catch (error) {
     console.error('Error processing webhook:', error);
     res.sendStatus(500);
+  }
+});
+
+app.post('/webhook/razorpay', async (req, res) => {
+  let claimActive = false;
+  let claimEventKey = '';
+  let claimTenantId = null;
+  const releaseClaim = async () => {
+    if (!claimActive || !claimEventKey) return;
+    await releasePaymentEvent(claimEventKey, claimTenantId);
+    claimActive = false;
+    claimEventKey = '';
+    claimTenantId = null;
+  };
+
+  try {
+    const secret = config.RAZORPAY_WEBHOOK_SECRET;
+    if (!secret) {
+      res.status(500).json({ ok: false, error: 'RAZORPAY_WEBHOOK_SECRET missing' });
+      return;
+    }
+    const signature = String(req.get('x-razorpay-signature') || '');
+    if (!signature) {
+      res.sendStatus(401);
+      return;
+    }
+    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+    if (!safeEqual(signature, expected)) {
+      res.sendStatus(401);
+      return;
+    }
+
+    const event = String(req.body?.event || '');
+    const supported = new Set(['payment_link.paid', 'payment.captured', 'order.paid']);
+    if (!supported.has(event)) {
+      res.status(200).json({ ok: true, ignored: event || 'unknown_event' });
+      return;
+    }
+
+    const paymentEntity = req.body?.payload?.payment?.entity || {};
+    const paymentLinkEntity = req.body?.payload?.payment_link?.entity || {};
+    const invoiceEntity = req.body?.payload?.invoice?.entity || {};
+    const notes = paymentEntity?.notes || paymentLinkEntity?.notes || invoiceEntity?.notes || {};
+
+    let tenantId = resolveTenantId(req, { allowDefault: false });
+    if (config.ENABLE_TENANT_SCOPING && !tenantId) {
+      tenantId = String(notes?.tenant_id || notes?.tenant || '').trim();
+    }
+    if (config.ENABLE_TENANT_SCOPING && !tenantId) {
+      res.status(400).json({ ok: false, error: 'Missing tenant_id for scoped mode' });
+      return;
+    }
+
+    const paymentId =
+      paymentEntity?.id ||
+      paymentLinkEntity?.id ||
+      invoiceEntity?.id ||
+      notes?.payment_id ||
+      '';
+    const amountPaise =
+      parseInt(String(paymentEntity?.amount ?? paymentLinkEntity?.amount ?? invoiceEntity?.amount ?? notes?.amount_paise ?? ''), 10) || 0;
+    const currency = String(paymentEntity?.currency || paymentLinkEntity?.currency || invoiceEntity?.currency || notes?.currency || 'INR').toUpperCase();
+    const planCode = inferPlanCode(notes, amountPaise);
+    const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex');
+    const eventKeyBase = paymentId ? `payment:${paymentId}` : `${event}:${bodyHash}`;
+    const eventKey = (config.ENABLE_TENANT_SCOPING && tenantId) ? `${tenantId}:${eventKeyBase}` : eventKeyBase;
+
+    const existingByEvent = await findPaymentLogByEventKey(eventKey, tenantId);
+    if (existingByEvent) {
+      res.status(200).json({ ok: true, ignored: 'duplicate_event' });
+      return;
+    }
+    if (paymentId) {
+      const existingByPayment = await findPaymentLogByPaymentId(paymentId, tenantId);
+      if (existingByPayment) {
+        res.status(200).json({ ok: true, ignored: 'duplicate_payment' });
+        return;
+      }
+    }
+
+    let eventClaim = await claimPaymentEvent(eventKey, tenantId);
+    if (!eventClaim.ok && eventClaim.reason === 'duplicate') {
+      const existingAfterDuplicate = await findPaymentLogByEventKey(eventKey, tenantId);
+      if (existingAfterDuplicate) {
+        res.status(200).json({ ok: true, ignored: 'duplicate_event' });
+        return;
+      }
+      await releasePaymentEvent(eventKey, tenantId);
+      eventClaim = await claimPaymentEvent(eventKey, tenantId);
+    }
+    if (!eventClaim.ok) {
+      if (eventClaim.reason === 'duplicate') {
+        res.status(200).json({ ok: true, ignored: 'duplicate_event' });
+        return;
+      }
+      if (eventClaim.reason === 'schema_missing') {
+        res.status(409).json({ ok: false, error: 'Run database_hardening.sql to add payment event table' });
+        return;
+      }
+      const detail = eventClaim.error?.message || eventClaim.reason;
+      console.error('payment event claim failed:', detail);
+      res.status(500).json({ ok: false, error: 'db' });
+      return;
+    }
+    claimActive = true;
+    claimEventKey = eventKey;
+    claimTenantId = tenantId;
+
+    const rawPhone =
+      paymentEntity?.contact ||
+      paymentLinkEntity?.customer?.contact ||
+      paymentLinkEntity?.customer?.phone ||
+      invoiceEntity?.customer_details?.phone ||
+      notes?.phone ||
+      notes?.mobile ||
+      notes?.user_phone ||
+      '';
+    const userPhone = await resolveExistingUserPhone(rawPhone, tenantId);
+    if (!userPhone) {
+      await releaseClaim();
+      res.status(200).json({ ok: true, ignored: 'user_not_found' });
+      return;
+    }
+
+    const defaultPlanDays = Number.isInteger(config.PRO_PLAN_DAYS) ? Math.max(1, config.PRO_PLAN_DAYS) : 30;
+    const amountBasedDays = amountPaise === 19900 ? 30 : amountPaise === 49900 ? 30 : defaultPlanDays;
+    const planDays = parsePositiveInt(notes?.plan_days || notes?.days, amountBasedDays);
+    const { data: currentUser, error: currentErr } = await supabase
+      .from('users')
+      .select('pro_expires_at')
+      .match(userMatch(tenantId, userPhone))
+      .single();
+    if (currentErr) {
+      if (/pro_expires_at|is_pro/i.test(currentErr.message || '')) {
+        await releaseClaim();
+        res.status(409).json({ ok: false, error: 'Run database_hardening.sql to add pro columns' });
+        return;
+      }
+      console.error('users select before pro update failed:', currentErr.message);
+    }
+
+    const nowMs = Date.now();
+    const currentExpiry = Date.parse(currentUser?.pro_expires_at || '');
+    const startMs = Number.isFinite(currentExpiry) && currentExpiry > nowMs ? currentExpiry : nowMs;
+    const nextExpiry = new Date(startMs + (planDays * 24 * 60 * 60 * 1000)).toISOString();
+
+    const { error: upErr } = await supabase
+      .from('users')
+      .update({ is_pro: true, pro_expires_at: nextExpiry })
+      .match(userMatch(tenantId, userPhone));
+    if (upErr) {
+      if (/pro_expires_at|is_pro/i.test(upErr.message || '')) {
+        await releaseClaim();
+        res.status(409).json({ ok: false, error: 'Run database_hardening.sql to add pro columns' });
+        return;
+      }
+      console.error('users pro update failed:', upErr.message);
+      await releaseClaim();
+      res.status(500).json({ ok: false, error: 'db' });
+      return;
+    }
+
+    const paymentLogRow = withTenant(tenantId, {
+      payment_id: paymentId || null,
+      event_key: eventKey,
+      event_name: event,
+      user_phone: userPhone,
+      plan_code: planCode,
+      plan_days: planDays,
+      amount_paise: amountPaise || null,
+      currency,
+      status: 'paid',
+      paid_at: new Date().toISOString(),
+      notes
+    });
+    const { error: payLogErr } = await supabase.from('subscription_payments').insert(paymentLogRow);
+    if (payLogErr && String(payLogErr.code) === '23505') {
+      claimActive = false;
+      claimEventKey = '';
+      claimTenantId = null;
+      res.status(200).json({ ok: true, ignored: 'duplicate_event' });
+      return;
+    }
+    if (payLogErr && /subscription_payments/i.test(payLogErr.message || '')) {
+      await releaseClaim();
+      res.status(409).json({ ok: false, error: 'Run database_hardening.sql to add subscription_payments table' });
+      return;
+    }
+    if (payLogErr) {
+      console.error('subscription_payments insert failed:', payLogErr.message);
+      await releaseClaim();
+      res.status(500).json({ ok: false, error: 'db' });
+      return;
+    }
+
+    claimActive = false;
+    claimEventKey = '';
+    claimTenantId = null;
+
+    const expiryDate = nextExpiry.slice(0, 10);
+    await sendWhatsAppMessage(userPhone, `Pro activated (${planCode}). Valid until ${expiryDate}.`);
+    res.status(200).json({
+      ok: true,
+      user_phone: userPhone,
+      expires_at: nextExpiry,
+      plan_code: planCode,
+      plan_days: planDays,
+      amount_paise: amountPaise || null
+    });
+  } catch (e) {
+    await releaseClaim();
+    console.error('razorpay webhook error:', e.message);
+    res.status(500).json({ ok: false });
   }
 });
 
@@ -1511,7 +2253,7 @@ app.get('/health/db', async (req, res) => {
 app.post('/internal/reminders', async (req, res) => {
   try {
     const token = req.headers['x-reminder-token'];
-    if (!token || token !== process.env.REMINDER_TOKEN) return res.sendStatus(401);
+    if (!token || token !== config.REMINDER_TOKEN) return res.sendStatus(401);
     const { runOnce } = require('./reminder');
     await runOnce();
     res.json({ ok: true });

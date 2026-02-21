@@ -88,16 +88,18 @@ A professional WhatsApp bot to track therapy sessions with automatic summaries a
    - Copy entire content from `database.sql` file
    - Paste and click "Run"
    - You should see "Success" message
+   - If upgrading an existing deployment, run `database_hardening.sql` after this
+   - For stricter production security, run `database_rls_hardening.sql` as well
 
 4. **Get Your Credentials**
    - Go to "Settings" → "API"
    - Copy these:
      - **Project URL** (looks like: https://xxxxx.supabase.co)
-     - **anon/public key** (the long key under "Project API keys")
+     - **service_role key** (keep this secret; do not expose in frontend)
 
 **Save these:**
 - ✅ Supabase URL
-- ✅ Supabase Anon Key
+- ✅ Supabase Service Role Key
 
 ---
 
@@ -140,12 +142,30 @@ A professional WhatsApp bot to track therapy sessions with automatic summaries a
    VERIFY_TOKEN = therapy_tracker_2025
    SUPABASE_URL = [your supabase URL from Step 2]
    SUPABASE_KEY = [your supabase anon key from Step 2]
+   SUPABASE_SERVICE_ROLE = [your service_role key from Step 2]
+   TRACKER_SHARE_SECRET = [long random secret for signed /mytracker links]
+   INTERNAL_REPORT_TOKEN = [long random internal token]
+   REMINDER_TOKEN = [long random internal token]
+   RAZORPAY_PAYMENT_LINK_199 = [payment link for INR 199 plan]
+   RAZORPAY_PAYMENT_LINK_499 = [payment link for INR 499 plan]
+   RAZORPAY_WEBHOOK_SECRET = [razorpay webhook secret]
+   PRO_PLAN_DAYS = 30
    ```
 
 6. **Deploy**
    - Click "Create Web Service"
    - Wait 5 minutes for deployment
    - Once deployed, copy your app URL (e.g., https://therapy-tracker-bot.onrender.com)
+
+7. **Razorpay Webhook (for auto Pro activation)**
+   - In Razorpay Dashboard -> Webhooks, add:
+   - URL: `https://your-render-url.onrender.com/webhook/razorpay`
+   - Secret: set this same value in `RAZORPAY_WEBHOOK_SECRET`
+   - Events: `payment_link.paid`, `payment.captured`, `order.paid`
+   - Recommended notes on payment links:
+     - `plan`: `parent_basic_199` or `pro_plus_499`
+     - `plan_days`: `30`
+     - `user_phone`: customer WhatsApp number (optional fallback)
 
 **Save this:**
 - ✅ Render App URL
