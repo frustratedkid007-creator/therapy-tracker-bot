@@ -303,7 +303,7 @@ const ALLOWED_BY_PERMISSION = {
   billing: new Set(['owner', 'parent']),
   data: new Set(['owner', 'parent']),
   members_view: new Set(['owner', 'parent']),
-  members_manage: new Set(['owner']),
+  members_manage: new Set(['owner', 'parent']),
   admin: new Set(['owner'])
 };
 
@@ -339,7 +339,7 @@ function hasPermission(role, permission) {
 
 function permissionDeniedText(role, permission) {
   const r = pendingTargetRole(role) || 'member';
-  if (permission === 'members_manage') return `Only owner can invite or manage members. Your role: ${r}.`;
+  if (permission === 'members_manage') return `Only owner/parent can invite or manage members. Your role: ${r}.`;
   if (permission === 'admin') return `Clinic admin commands are allowed for owner only. Your role: ${r}.`;
   if (permission === 'billing') return `Billing actions are allowed for owner/parent. Your role: ${r}.`;
   if (permission === 'setup') return `Setup changes are allowed for owner/parent. Your role: ${r}.`;
@@ -952,8 +952,8 @@ async function handleAddMember(userPhone, tenantId, role, rawPhone) {
     .match(withTenant(tenantId, { child_id: childId, member_phone: userPhone }))
     .limit(1);
   const currentRole = Array.isArray(current) && current[0]?.role ? String(current[0].role).toLowerCase() : '';
-  if (currentRole !== 'owner') {
-    await sendMessage(userPhone, 'Only owner can add members.');
+  if (currentRole !== 'owner' && currentRole !== 'parent') {
+    await sendMessage(userPhone, 'Only owner/parent can add members.');
     return;
   }
 
@@ -1016,7 +1016,8 @@ async function handleAddMember(userPhone, tenantId, role, rawPhone) {
   await sendMessage(
     userPhone,
     `Invite sent for ${targetRole}: ${normalized}\n` +
-    `They must accept before getting access.`
+    `They must accept before getting access.\n` +
+    `If they do not receive invite, ask them to send "hi" to this bot once, then retry.`
   );
   await sendMessage(
     normalized,

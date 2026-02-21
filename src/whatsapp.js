@@ -171,13 +171,19 @@ async function sendQuickMenu(to, tenantId) {
       type: 'interactive',
       interactive: {
         type: 'button',
-        body: { text: '⚡ Quick actions' },
+        body: { text: hasConfig ? '⚡ Quick actions' : '⚡ Setup actions' },
         action: {
-          buttons: [
-            { type: 'reply', reply: { id: 'status', title: 'Status' } },
-            { type: 'reply', reply: { id: 'weekly', title: 'Weekly' } },
-            { type: 'reply', reply: { id: 'more', title: 'More' } }
-          ]
+          buttons: hasConfig
+            ? [
+                { type: 'reply', reply: { id: 'setup', title: '⚙️ Setup' } },
+                { type: 'reply', reply: { id: 'reset_month', title: '🧹 Reset' } },
+                { type: 'reply', reply: { id: 'invite_member', title: '➕ Invite' } }
+              ]
+            : [
+                { type: 'reply', reply: { id: 'setup', title: '⚙️ Setup' } },
+                { type: 'reply', reply: { id: 'invite_member', title: '➕ Invite' } },
+                { type: 'reply', reply: { id: 'more', title: 'More' } }
+              ]
         }
       }
     }, {
@@ -195,7 +201,7 @@ async function sendMoreMenu(to) {
   const fallbackText =
     `Could not open list menu on this device.\n` +
     `Type one command:\n` +
-    `status, weekly, summary, feedback, plan_status`;
+    `summary, setup, reset_month, invite_member, members`;
   try {
     // WhatsApp list messages support max 10 rows across sections.
     await axios.post(`https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`, {
@@ -210,20 +216,20 @@ async function sendMoreMenu(to) {
           button: 'Open',
           sections: [
             { title: 'Tracking', rows: [
-              { id: 'status', title: 'Current status' },
-              { id: 'weekly', title: 'Weekly insights' },
               { id: 'summary', title: 'Monthly summary' },
               { id: 'download_report', title: 'Report PDF' },
-              { id: 'streak', title: 'Streak journey' }
-            ]},
-            { title: 'Notes', rows: [
               { id: 'feedback_note', title: 'Therapy notes (voice)' },
               { id: 'note_template', title: 'Structured note' }
             ]},
-            { title: 'Account', rows: [
-              { id: 'plan_status', title: 'Plan status' },
-              { id: 'my_referral', title: 'Referral code' },
-              { id: 'invite_member', title: 'Invite member' }
+            { title: 'Setup & Reset', rows: [
+              { id: 'setup', title: 'Setup this month' },
+              { id: 'reset_month', title: 'Reset this month' },
+              { id: 'backfill_attended', title: 'Mark attended dates' },
+              { id: 'backfill_missed', title: 'Mark missed dates' }
+            ]},
+            { title: 'Family & Plan', rows: [
+              { id: 'invite_member', title: 'Invite member' },
+              { id: 'members', title: 'View members' }
             ]}
           ]
         }
