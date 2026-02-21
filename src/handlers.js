@@ -614,8 +614,8 @@ async function handleMessage(userPhone, message, tenantId) {
     if (!user) {
       await createUser(userPhone, tenant);
       await sendMessage(userPhone,
-        `ðŸ‘‹ Welcome to Therapy Tracker\n` +
-        `âš™ï¸ Type 'setup' to begin`
+        `👋 Welcome to Therapy Tracker\n` +
+        `⚙️ Type 'setup' to begin`
       );
       await sendQuickMenu(userPhone, tenant);
       return;
@@ -877,7 +877,7 @@ async function handleMessage(userPhone, message, tenantId) {
     } else if (message.startsWith('tz:')) {
       const tz = message.slice(3);
       await supabase.from('users').update({ timezone: tz }).match(userMatch(tenant, userPhone));
-      await sendMessage(userPhone, `âœ… Timezone updated\nðŸŒ ${tz}`);
+      await sendMessage(userPhone, `✅ Timezone updated\n🌍 ${tz}`);
       await sendQuickMenu(userPhone, tenant);
     } else if (message === 'settings_reminders') {
       await sendRemindersPicker(userPhone, tenant);
@@ -887,18 +887,18 @@ async function handleMessage(userPhone, message, tenantId) {
       const hour = parseInt(message.split(':')[1], 10);
       if (Number.isInteger(hour) && hour >= 0 && hour <= 23) {
         await supabase.from('users').update({ reminder_time_hour: hour }).match(userMatch(tenant, userPhone));
-        await sendMessage(userPhone, `âœ… Reminder time updated\nâ° ${String(hour).padStart(2, '0')}:00`);
+        await sendMessage(userPhone, `✅ Reminder time updated\n⏰ ${String(hour).padStart(2, '0')}:00`);
         await sendQuickMenu(userPhone, tenant);
       } else {
         await sendReminderTimePicker(userPhone, tenant);
       }
     } else if (message === 'reminders_on') {
       await supabase.from('users').update({ reminders_enabled: true }).match(userMatch(tenant, userPhone));
-      await sendMessage(userPhone, `âœ… Reminders ON`);
+      await sendMessage(userPhone, `✅ Reminders ON`);
       await sendQuickMenu(userPhone, tenant);
     } else if (message === 'reminders_off') {
       await supabase.from('users').update({ reminders_enabled: false }).match(userMatch(tenant, userPhone));
-      await sendMessage(userPhone, `âœ… Reminders OFF`);
+      await sendMessage(userPhone, `✅ Reminders OFF`);
       await sendQuickMenu(userPhone, tenant);
     } else if (message === 'setup_fresh') {
       await sendSetupPresets(userPhone);
@@ -909,10 +909,10 @@ async function handleMessage(userPhone, message, tenantId) {
       if (setWaitErr) console.error('Supabase users set waiting error:', setWaitErr.message);
     } else if (message === 'setup_mid') {
       await supabase.from('users').update({ waiting_for: 'setup_mid_config' }).match(userMatch(tenant, userPhone));
-      await sendMessage(userPhone, `ðŸ§® Midâ€‘month setup\nReply: [total] [cost] [carry] [used]\nEx: 16 800 2 6`);
+      await sendMessage(userPhone, `🧮 Mid-month setup\nReply: [total] [cost] [carry] [used]\nEx: 16 800 2 6`);
     } else if (message.includes('reset') || message === 'confirm_reset' || message === 'cancel_reset') {
       await handleReset(userPhone, message, tenant);
-    } else if (message.includes('attended') || message === 'done' || message === 'ok' || message === 'âœ“') {
+    } else if (message.includes('attended') || message === 'done' || message === 'ok' || message === '✅') {
       await sendAttendedDatePicker(userPhone, tenant);
     } else if (message.includes('missed') || message.includes('cancelled')) {
       await handleMissed(userPhone, tenant);
@@ -949,7 +949,7 @@ async function handleMessage(userPhone, message, tenantId) {
     }
   } catch (error) {
     console.error('Error handling message:', error);
-    await sendMessage(userPhone, 'âš ï¸ Something went wrong. Please try again.');
+    await sendMessage(userPhone, '⚠️ Something went wrong. Please try again.');
   }
 }
 
@@ -979,7 +979,7 @@ async function handleAttended(userPhone, user, tenantId) {
 
   if (!configRow) {
     await sendMessage(userPhone,
-      `âš ï¸ Please run setup first!\n\nType 'setup' to configure your monthly sessions.`
+      `⚠️ Please run setup first!\n\nType 'setup' to configure your monthly sessions.`
     );
     return;
   }
@@ -1009,8 +1009,8 @@ async function handleAttended(userPhone, user, tenantId) {
   const remaining = totalSessions - attended;
 
   await sendMessage(userPhone,
-    `âœ… Session logged\n` +
-    `ðŸŽ¯ ${remaining} left this month`
+    `✅ Session logged\n` +
+    `🎯 ${remaining} left this month`
   );
   await sendQuickMenu(userPhone, tenantId);
   await promptMood(userPhone, today, 1, tenantId, true);
@@ -1164,7 +1164,7 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
       }
       await supabase.from('monthly_config').delete().match(userPhoneMatch(tenantId, userPhone)).eq('month', month);
       await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
-      await sendMessage(userPhone, `ðŸ§¹ Reset complete for ${month}`);
+      await sendMessage(userPhone, `🧹 Reset complete for ${month}`);
       await sendQuickMenu(userPhone, tenantId);
       return true;
     }
@@ -1241,7 +1241,7 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
     }));
     if (insErr) console.error('Supabase sessions insert cancel error:', insErr.message);
     await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
-    await sendMessage(userPhone, `âŒ Missed logged\nðŸ—“ ${date}\nðŸ“ ${reason}`);
+    await sendMessage(userPhone, `❌ Missed logged\n🗓️ ${date}\n📝 ${reason}`);
     await sendQuickMenu(userPhone, tenantId);
     return true;
   }
@@ -1270,9 +1270,9 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
     }
 
     await sendMessage(userPhone,
-      `âŒ Missed logged\n` +
-      `ðŸ—“ ${today}\n` +
-      `ðŸ“ ${extractVoiceNote(message) || message}`
+      `❌ Missed logged\n` +
+      `🗓️ ${today}\n` +
+      `📝 ${extractVoiceNote(message) || message}`
     );
     return true;
   }
@@ -1287,14 +1287,14 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
       const month = date.slice(0, 7);
       const childId = await getOrCreateDefaultChild(userPhone, tenantId);
       await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'attended', month, reason: 'duplicate_confirmed', tenantId });
-      await sendMessage(userPhone, `âœ… Added again\nðŸ—“ ${date}`);
+      await sendMessage(userPhone, `✅ Added again\n🗓️ ${date}`);
       await sendQuickMenu(userPhone, tenantId);
       await promptMood(userPhone, date, count, tenantId);
       return true;
     }
     if (no) {
       await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
-      await sendMessage(userPhone, 'âŽ Skipped');
+      await sendMessage(userPhone, '❎ Skipped');
       await sendQuickMenu(userPhone, tenantId);
       return true;
     }
@@ -1319,13 +1319,13 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
       const month = date.slice(0, 7);
       await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'cancelled', month, reason, tenantId });
       await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
-      await sendMessage(userPhone, `âŒ Missed logged again\nðŸ—“ ${date}\nðŸ”¢ ${count}\nðŸ“ ${reason}`);
+      await sendMessage(userPhone, `❌ Missed logged again\n🗓️ ${date}\n🔢 ${count}\n📝 ${reason}`);
       await sendQuickMenu(userPhone, tenantId);
       return true;
     }
     if (no) {
       await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
-      await sendMessage(userPhone, 'âŽ Skipped');
+      await sendMessage(userPhone, '❎ Skipped');
       await sendQuickMenu(userPhone, tenantId);
       return true;
     }
@@ -1353,7 +1353,7 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
       const month = date.slice(0, 7);
       await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'cancelled', month, reason, tenantId });
       await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
-      await sendMessage(userPhone, `ðŸ” Replaced Attended with Missed\nðŸ—“ ${date}\nðŸ”¢ ${count}\nðŸ“ ${reason}`);
+      await sendMessage(userPhone, `🔁 Replaced Attended with Missed\n🗓️ ${date}\n🔢 ${count}\n📝 ${reason}`);
       await sendQuickMenu(userPhone, tenantId);
       return true;
     }
@@ -1380,7 +1380,7 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
       await supabase.from('sessions').delete().match(withTenant(tenantId, { [key]: val })).eq('date', date).eq('status', 'cancelled');
       const month = date.slice(0, 7);
       await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'attended', month, reason: 'replaced_cancelled', tenantId });
-      await sendMessage(userPhone, `ðŸ” Replaced Missed with Attended\nðŸ—“ ${date}`);
+      await sendMessage(userPhone, `🔁 Replaced Missed with Attended\n🗓️ ${date}`);
       await sendQuickMenu(userPhone, tenantId);
       await promptMood(userPhone, date, count, tenantId);
       return true;
@@ -1420,7 +1420,7 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
       return true;
     }
     await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'attended', month, tenantId });
-    await sendMessage(userPhone, `âœ… Attended logged\nðŸ—“ ${date}\nðŸ”¢ ${count}`);
+    await sendMessage(userPhone, `✅ Attended logged\n🗓️ ${date}\n🔢 ${count}`);
     await sendQuickMenu(userPhone, tenantId);
     await promptMood(userPhone, date, count, tenantId);
     return true;
@@ -1451,7 +1451,7 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
       return true;
     }
     await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'attended', month, tenantId });
-    await sendMessage(userPhone, `âœ… Backfilled Attended\nðŸ—“ ${date}\nðŸ”¢ ${count}`);
+    await sendMessage(userPhone, `✅ Backfilled Attended\n🗓️ ${date}\n🔢 ${count}`);
     await sendQuickMenu(userPhone, tenantId);
     await promptMood(userPhone, date, count, tenantId);
     return true;
@@ -1505,7 +1505,7 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
     }
     await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'cancelled', month, reason, tenantId });
     await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
-    await sendMessage(userPhone, `âŒ Backfilled Missed\nðŸ—“ ${date}\nðŸ”¢ ${count}\nðŸ“ ${reason}`);
+    await sendMessage(userPhone, `❌ Backfilled Missed\n🗓️ ${date}\n🔢 ${count}\n📝 ${reason}`);
     await sendQuickMenu(userPhone, tenantId);
     return true;
   }
@@ -1536,7 +1536,7 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
     }
     await insertSessionsWithFallback({ userPhone, childId, date, count, status: 'cancelled', month, reason, tenantId });
     await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
-    await sendMessage(userPhone, `âŒ Backfilled Missed\nðŸ—“ ${date}\nðŸ”¢ ${count}\nðŸ“ ${reason}`);
+    await sendMessage(userPhone, `❌ Backfilled Missed\n🗓️ ${date}\n🔢 ${count}\n📝 ${reason}`);
     await sendQuickMenu(userPhone, tenantId);
     return true;
   }
@@ -1580,14 +1580,14 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
       console.error('Supabase users clear after setup error:', clr2Err.message);
     }
 
-    await sendMessage(userPhone, `âœ… Setup complete for ${month}.\nTotal sessions: ${total_sessions}\nCarry forward: ${carry_forward}\nPaid this month: ${paid_sessions}\nYou can now tap 'Attended'.`);
+    await sendMessage(userPhone, `✅ Setup complete for ${month}.\nTotal sessions: ${total_sessions}\nCarry forward: ${carry_forward}\nPaid this month: ${paid_sessions}\nYou can now tap 'Attended'.`);
     return true;
   }
 
   if (user.waiting_for === 'setup_mid_config') {
     const parts = message.split(/\s+/).map(v => v.trim()).filter(Boolean);
     if (parts.length < 4 || parts.some(p => isNaN(parseInt(p, 10)))) {
-      await sendMessage(userPhone, `ðŸ§® Midâ€‘month setup\nReply: [total] [cost] [carry] [used]\nEx: 16 800 2 6`);
+      await sendMessage(userPhone, `🧮 Mid-month setup\nReply: [total] [cost] [carry] [used]\nEx: 16 800 2 6`);
       return true;
     }
     const total_sessions = parseInt(parts[0], 10);
@@ -1609,7 +1609,7 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
 
     await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
     const remaining = total_sessions - used;
-    await sendMessage(userPhone, `âœ… Setup complete\nðŸ§® Total: ${total_sessions}\nâœ… Done: ${used}\nðŸŽ¯ Remaining: ${remaining}`);
+    await sendMessage(userPhone, `✅ Setup complete\n🧮 Total: ${total_sessions}\n✅ Done: ${used}\n🎯 Remaining: ${remaining}`);
     await sendQuickMenu(userPhone, tenantId);
     return true;
   }
@@ -1630,7 +1630,7 @@ async function handleSummary(userPhone, user, tenantId) {
   }
 
   if (!configRow) {
-    await sendMessage(userPhone, 'â„¹ï¸ No config. Type "setup" to begin.');
+    await sendMessage(userPhone, 'ℹ️ No config. Type "setup" to begin.');
     return;
   }
 
@@ -1660,11 +1660,11 @@ async function handleSummary(userPhone, user, tenantId) {
   const lastWeekStart = new Date(lastDay); lastWeekStart.setDate(lastDay.getDate() - 6);
   const isLastWeek = now >= lastWeekStart;
 
-  const header = `ðŸ“Š ${monthName} SUMMARY`;
-  const payment = `ðŸ’° PAYMENT\nâ€¢ Paid: ${configRow.paid_sessions || 0} sessions\nâ€¢ Cost: â‚¹${configRow.cost_per_session || 0}/session\nâ€¢ Total paid: â‚¹${(configRow.paid_sessions || 0) * (configRow.cost_per_session || 0)}`;
-  const attendance = `ðŸ“ˆ ATTENDANCE\nâ€¢ Attended: ${attended} (â‚¹${amountUsed})\nâ€¢ Cancelled: ${cancelled} (â‚¹${amountCancelled})`;
-  const costBreakdown = `ðŸ’¸ COST BREAKDOWN\nâ€¢ Used: â‚¹${amountUsed}\nâ€¢ Buffer: â‚¹${bufferValue}`;
-  const summaryBlock = `âœ¨ SUMMARY\nâ€¢ Remaining: ${Math.max(0, remaining)} sessions` + (isLastWeek ? `\nâ€¢ Carry forward: ${Math.max(0, remaining)} sessions` : '');
+  const header = `📊 ${monthName} SUMMARY`;
+  const payment = `💰 PAYMENT\n• Paid: ${configRow.paid_sessions || 0} sessions\n• Cost: ₹${configRow.cost_per_session || 0}/session\n• Total paid: ₹${(configRow.paid_sessions || 0) * (configRow.cost_per_session || 0)}`;
+  const attendance = `📈 ATTENDANCE\n• Attended: ${attended} (₹${amountUsed})\n• Cancelled: ${cancelled} (₹${amountCancelled})`;
+  const costBreakdown = `💸 COST BREAKDOWN\n• Used: ₹${amountUsed}\n• Buffer: ₹${bufferValue}`;
+  const summaryBlock = `✨ SUMMARY\n• Remaining: ${Math.max(0, remaining)} sessions` + (isLastWeek ? `\n• Carry forward: ${Math.max(0, remaining)} sessions` : '');
 
   const summary = [header, '', payment, '', attendance, '', costBreakdown, '', summaryBlock].join('\n');
 
@@ -1704,13 +1704,13 @@ async function handleUndo(userPhone, tenantId) {
     return;
   }
   await supabase.from('sessions').delete().eq('id', row.id);
-  const label = row.status === 'attended' ? 'âœ… Attended' : 'âŒ Missed';
-  await sendMessage(userPhone, `â†©ï¸ Undone\n${label}\nðŸ—“ ${String(row.date).slice(0, 10)}`);
+  const label = row.status === 'attended' ? '✅ Attended' : '❌ Missed';
+  await sendMessage(userPhone, `↩️ Undone\n${label}\n🗓️ ${String(row.date).slice(0, 10)}`);
   await sendQuickMenu(userPhone, tenantId);
 }
 
 async function handleSetup(userPhone, tenantId) {
-  await sendMessage(userPhone, `âš™ï¸ Setup\nChoose a mode:`);
+  await sendMessage(userPhone, `⚙️ Setup\nChoose a mode:`);
   await sendSetupMode(userPhone);
 
   const { error: setWaitErr } = await supabase
@@ -1745,7 +1745,7 @@ async function handleHoliday(userPhone, message, tenantId) {
     }
   }
 
-  await sendMessage(userPhone, `ðŸ–ï¸ Marked ${days} day(s) off`);
+  await sendMessage(userPhone, `🏖️ Marked ${days} day(s) off`);
 }
 
 async function handleReset(userPhone, message, tenantId) {
@@ -1769,7 +1769,7 @@ async function markHolidayRange(userPhone, days, tenantId) {
     const { error } = await supabase.from('holidays').insert(withTenant(tenantId, { user_phone: userPhone, date: dateStr, month: currentMonth }));
     if (error) console.error('Supabase holidays insert error:', error.message);
   }
-  await sendMessage(userPhone, `ðŸ–ï¸ Marked ${days} day(s) off`);
+  await sendMessage(userPhone, `🏖️ Marked ${days} day(s) off`);
 }
 
 async function sendReminderDefaults(userPhone, tenantId) {
@@ -1851,7 +1851,7 @@ async function confirmAttended(userPhone, tenantId) {
   const attended = list.filter(s => s.status === 'attended').length;
   const totalSessions = (configRow.paid_sessions || 0) + (configRow.carry_forward || 0);
   const remaining = totalSessions - attended;
-  await sendMessage(userPhone, `âœ… Session logged\nðŸŽ¯ ${remaining} left this month`);
+  await sendMessage(userPhone, `✅ Session logged\n🎯 ${remaining} left this month`);
   await sendQuickMenu(userPhone, tenantId);
   await promptMood(userPhone, today, count, tenantId, true);
 }

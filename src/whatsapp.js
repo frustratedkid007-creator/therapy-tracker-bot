@@ -139,9 +139,9 @@ async function sendQuickMenu(to, tenantId) {
       : 'Complete setup once, then start session tracking.';
     const primaryButtons = hasConfig
       ? [
-          { type: 'reply', reply: { id: 'attended', title: 'Attended' } },
-          { type: 'reply', reply: { id: 'missed', title: 'Missed' } },
-          { type: 'reply', reply: { id: 'summary', title: 'Summary' } }
+          { type: 'reply', reply: { id: 'attended', title: '✅ Attended' } },
+          { type: 'reply', reply: { id: 'missed', title: '❌ Missed' } },
+          { type: 'reply', reply: { id: 'summary', title: '📊 Summary' } }
         ]
       : [
           { type: 'reply', reply: { id: 'setup', title: 'Setup' } },
@@ -551,9 +551,9 @@ async function sendSetupPresets(to) {
             {
               title: 'Common Plans',
               rows: [
-                { id: '16 800 0', title: '16 sessions â€¢ â‚¹800 â€¢ 0 CF' },
-                { id: '12 1000 0', title: '12 sessions â€¢ â‚¹1000 â€¢ 0 CF' },
-                { id: '8 800 0', title: '8 sessions â€¢ â‚¹800 â€¢ 0 CF' }
+                { id: '16 800 0', title: '16 sessions • ₹800 • 0 CF' },
+                { id: '12 1000 0', title: '12 sessions • ₹1000 • 0 CF' },
+                { id: '8 800 0', title: '8 sessions • ₹800 • 0 CF' }
               ]
             },
             {
@@ -587,7 +587,7 @@ async function sendSetupMode(to) {
         body: { text: 'Choose how to set up' },
         action: { buttons: [
           { type: 'reply', reply: { id: 'setup_fresh', title: 'Start Fresh' } },
-          { type: 'reply', reply: { id: 'setup_mid', title: 'Start Midâ€‘Month' } }
+          { type: 'reply', reply: { id: 'setup_mid', title: 'Start Mid-Month' } }
         ] }
       }
     }, { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
@@ -645,12 +645,12 @@ async function sendMoodPicker(to, date, count) {
       type: 'interactive',
       interactive: {
         type: 'button',
-        body: { text: `How was the session?\nðŸ—“ ${date} â€¢ ${count} session${count > 1 ? 's' : ''}` },
+        body: { text: `How was the session?\n🗓️ ${date} • ${count} session${count > 1 ? 's' : ''}` },
         action: {
           buttons: [
-            { type: 'reply', reply: { id: 'mood:excellent', title: 'ðŸ˜ Excellent' } },
-            { type: 'reply', reply: { id: 'mood:good', title: 'ðŸ™‚ Good' } },
-            { type: 'reply', reply: { id: 'mood:okay', title: 'ðŸ˜ Okay' } }
+            { type: 'reply', reply: { id: 'mood:excellent', title: '😍 Excellent' } },
+            { type: 'reply', reply: { id: 'mood:good', title: '🙂 Good' } },
+            { type: 'reply', reply: { id: 'mood:okay', title: '😐 Okay' } }
           ]
         }
       }
@@ -662,7 +662,7 @@ async function sendMoodPicker(to, date, count) {
       interactive: {
         type: 'button',
         body: { text: 'More options' },
-        action: { buttons: [ { type: 'reply', reply: { id: 'mood:tough', title: 'ðŸ˜£ Tough' } } ] }
+        action: { buttons: [ { type: 'reply', reply: { id: 'mood:tough', title: '😣 Tough' } } ] }
       }
     }, { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
   } catch (e) {
