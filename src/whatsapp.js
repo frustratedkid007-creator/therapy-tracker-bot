@@ -6,7 +6,7 @@ const { nowPartsInTimeZone, getUserTimeZone, lastNDatesFromToday } = require('./
 
 async function sendMessage(to, text) {
   try {
-    await axios.post(
+    const { data } = await axios.post(
       `https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: 'whatsapp',
@@ -22,7 +22,7 @@ async function sendMessage(to, text) {
       }
     );
     console.log(`Message sent to ${to}`);
-    return { ok: true };
+    return { ok: true, messageId: data?.messages?.[0]?.id || '' };
   } catch (error) {
     console.error('Error sending message:', error.response?.data || error.message);
     return { ok: false, error: error.response?.data || error.message };
@@ -203,7 +203,7 @@ async function sendMoreMenu(to) {
   const fallbackText =
     `Could not open list menu on this device.\n` +
     `Type one command:\n` +
-    `summary, setup, reset_month, invite_member, members`;
+    `summary, setup, reset_month, invite_member, members, child_profile`;
   try {
     // WhatsApp list messages support max 10 rows across sections.
     await axios.post(`https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`, {
@@ -219,7 +219,6 @@ async function sendMoreMenu(to) {
           sections: [
             { title: 'Tracking', rows: [
               { id: 'summary', title: 'Monthly summary' },
-              { id: 'download_report', title: 'Report PDF' },
               { id: 'feedback_note', title: 'Therapy notes (voice)' },
               { id: 'note_template', title: 'Structured note' }
             ]},
@@ -231,7 +230,8 @@ async function sendMoreMenu(to) {
             ]},
             { title: 'Family & Plan', rows: [
               { id: 'invite_member', title: 'Invite member' },
-              { id: 'members', title: 'View members' }
+              { id: 'members', title: 'View members' },
+              { id: 'child_profile', title: 'Child profile' }
             ]}
           ]
         }
@@ -279,7 +279,7 @@ async function sendInviteDecisionPicker(to, role, context = {}) {
       consentLine,
       'Do you want to join this tracker?'
     ].filter(Boolean);
-    await axios.post(`https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`, {
+    const { data } = await axios.post(`https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp',
       to,
       type: 'interactive',
@@ -296,10 +296,71 @@ async function sendInviteDecisionPicker(to, role, context = {}) {
         }
       }
     }, { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
-    return { ok: true };
+    return { ok: true, messageId: data?.messages?.[0]?.id || '' };
   } catch (error) {
     console.error('Error sending invite decision picker:', error.response?.data || error.message);
     return { ok: false, error: error.response?.data || error.message };
+  }
+}
+
+async function sendInviteTemplate(to, context = {}) {
+  const templateName = String(config.INVITE_TEMPLATE_NAME || '').trim();
+  const templateLang = String(config.INVITE_TEMPLATE_LANG || 'en').trim();
+  if (!templateName) return { ok: false, reason: 'template_not_configured' };
+
+  const role = String(context.role || 'parent').trim();
+  const childName = String(context.childName || 'Child tracker').trim();
+  const inviterPhone = String(context.inviterPhone || '').trim();
+  const botNumber = String(context.botNumber || config.WHATSAPP_PUBLIC_NUMBER || '').replace(/\D/g, '');
+
+  const payloadBase = {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: templateLang }
+    }
+  };
+
+  const payloadWithBody = {
+    ...payloadBase,
+    template: {
+      ...payloadBase.template,
+      components: [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: role || 'parent' },
+            { type: 'text', text: childName || 'Child tracker' },
+            { type: 'text', text: inviterPhone || '-' },
+            { type: 'text', text: botNumber || '-' }
+          ]
+        }
+      ]
+    }
+  };
+
+  try {
+    const { data } = await axios.post(
+      `https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`,
+      payloadWithBody,
+      { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+    return { ok: true, messageId: data?.messages?.[0]?.id || '', mode: 'template_with_params' };
+  } catch (firstError) {
+    try {
+      const { data } = await axios.post(
+        `https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`,
+        payloadBase,
+        { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      return { ok: true, messageId: data?.messages?.[0]?.id || '', mode: 'template_no_params' };
+    } catch (secondError) {
+      const err = secondError.response?.data || secondError.message || firstError.response?.data || firstError.message;
+      console.error('Error sending invite template:', err);
+      return { ok: false, error: err, reason: 'template_send_failed' };
+    }
   }
 }
 
@@ -738,6 +799,7 @@ module.exports = {
   sendProUpsell,
   sendInviteTypePicker,
   sendInviteDecisionPicker,
+  sendInviteTemplate,
   sendVoiceNotePrompt,
   sendMoodPicker
 };

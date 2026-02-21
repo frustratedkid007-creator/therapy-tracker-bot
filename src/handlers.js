@@ -25,6 +25,7 @@ const {
   sendYesNo,
   sendInviteTypePicker,
   sendInviteDecisionPicker,
+  sendInviteTemplate,
   sendVoiceNotePrompt,
   sendMoodPicker
 } = require('./whatsapp');
@@ -248,6 +249,21 @@ async function saveFeedbackNote(userPhone, text, tenantId, options = {}) {
     console.error('Supabase feedback_notes insert error:', error.message);
     return { ok: false, summary };
   }
+  try {
+    const childId = await getOrCreateDefaultChild(userPhone, tenantId);
+    if (childId) {
+      const childCtx = await getChildInviteContext(childId, tenantId, '');
+      const summaryLine = summary ? `\nSummary: ${truncateText(summary, 140)}` : '';
+      const noteLine = summary ? '' : `\nNote: ${truncateText(note, 140)}`;
+      await notifyChildMembers(
+        tenantId,
+        childId,
+        userPhone,
+        `📝 Therapy note updated\nChild: ${childCtx.childName}${summaryLine}${noteLine}\nBy: ${userPhone}`
+      );
+    }
+  } catch (_) {
+  }
   return { ok: true, summary, transcriptionStatus };
 }
 
@@ -354,17 +370,35 @@ function buildTypingHelp(role) {
   const lines = ['Try one command:'];
   if (hasPermission(role, 'log')) lines.push('attended, missed, summary');
   if (hasPermission(role, 'setup')) lines.push('setup, reset_month');
+  if (hasPermission(role, 'setup')) lines.push('child_profile, child_name <name>');
   if (hasPermission(role, 'members_manage')) lines.push('invite_member, add_parent <phone>');
   if (hasPermission(role, 'members_view')) lines.push('members');
   if (hasPermission(role, 'billing')) lines.push('plan_status, payment_status');
-  lines.push('help, menu');
+  lines.push('help, menu, invite_help');
   return lines.join('\n');
+}
+
+function buildInviteJoinLink() {
+  const publicNumber = String(config.WHATSAPP_PUBLIC_NUMBER || '').replace(/\D/g, '');
+  if (!publicNumber) return '';
+  return `https://wa.me/${publicNumber}?text=hi`;
 }
 
 function inviteRetryHint() {
   const publicNumber = String(config.WHATSAPP_PUBLIC_NUMBER || '').replace(/\D/g, '');
   if (!publicNumber) return 'Ask them to send "hi" once to this bot, then retry invite.';
-  return `Ask them to send "hi" to ${publicNumber}, then retry invite.`;
+  const joinLink = buildInviteJoinLink();
+  return `Ask them to send "hi" to ${publicNumber}, then retry invite.${joinLink ? `\nShare this link: ${joinLink}` : ''}`;
+}
+
+function normalizeDeliveryError(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch (_) {
+    return String(value);
+  }
 }
 
 async function resolveMemberContext(userPhone, tenantId) {
@@ -448,21 +482,63 @@ function buildInviteMessage(role, context) {
   const roleText = normalizeRole(role) === 'therapist' ? 'therapist' : 'parent';
   const childName = String(context?.childName || 'Child tracker').trim();
   const inviterPhone = String(context?.inviterPhone || '').trim();
+  const joinLink = buildInviteJoinLink();
   return (
     `Invitation to Therapy Tracker\n` +
     `Role: ${roleText}\n` +
     `Child: ${childName}\n` +
     `${inviterPhone ? `Invited by: ${inviterPhone}\n` : ''}` +
     `Reply "accept_invite" to join or "reject_invite" to decline.\n` +
-    `By accepting, you consent to receive session updates on WhatsApp for this child.`
+    `By accepting, you consent to receive session updates on WhatsApp for this child.` +
+    `${joinLink ? `\nIf this is your first message, open: ${joinLink}` : ''}`
   );
+}
+
+async function updateInviteMetaByMemberId(memberId, tenantId, patch) {
+  if (!memberId || !patch || typeof patch !== 'object') return;
+  try {
+    const { error } = await supabase
+      .from('child_members')
+      .update(patch)
+      .match(withTenant(tenantId, { id: memberId }));
+    if (error && !/(child_members|invite_|invited_by)/i.test(error.message || '')) {
+      console.error('child_members invite meta update error:', error.message);
+    }
+  } catch (_) {
+  }
 }
 
 async function sendInviteToMember(memberPhone, role, context) {
   const inviteText = buildInviteMessage(role, context);
   const textRes = await sendMessage(memberPhone, inviteText);
   const pickerRes = await sendInviteDecisionPicker(memberPhone, role, context);
-  return { ok: Boolean(textRes?.ok || pickerRes?.ok), textRes, pickerRes };
+  if (textRes?.ok || pickerRes?.ok) {
+    return {
+      ok: true,
+      channel: 'session',
+      textRes,
+      pickerRes,
+      messageId: textRes?.messageId || pickerRes?.messageId || ''
+    };
+  }
+  const templateRes = await sendInviteTemplate(memberPhone, {
+    role: normalizeRole(role) === 'therapist' ? 'therapist' : 'parent',
+    childName: context?.childName || 'Child tracker',
+    inviterPhone: context?.inviterPhone || '',
+    botNumber: config.WHATSAPP_PUBLIC_NUMBER || ''
+  });
+  if (templateRes?.ok) {
+    return {
+      ok: true,
+      channel: 'template',
+      textRes,
+      pickerRes,
+      templateRes,
+      messageId: templateRes?.messageId || ''
+    };
+  }
+  const error = normalizeDeliveryError(templateRes?.error || textRes?.error || pickerRes?.error || 'invite_delivery_failed');
+  return { ok: false, channel: 'failed', error, textRes, pickerRes, templateRes };
 }
 
 async function handleInviteAccept(userPhone, tenantId) {
@@ -474,6 +550,7 @@ async function handleInviteAccept(userPhone, tenantId) {
   }
   const invite = pending[0];
   const finalRole = pendingTargetRole(invite.role) || 'member';
+  const acceptedAt = new Date().toISOString();
   const { error } = await supabase
     .from('child_members')
     .update({ role: finalRole })
@@ -482,6 +559,16 @@ async function handleInviteAccept(userPhone, tenantId) {
     await sendMessage(userPhone, `Could not accept invite: ${error.message}`);
     return;
   }
+  await updateInviteMetaByMemberId(invite.id, tenantId, {
+    invite_delivery_status: 'accepted',
+    invite_accepted_at: acceptedAt,
+    invite_error: null
+  });
+  await recordConsentEvent(userPhone, tenantId, 'invite_accepted', {
+    child_id: invite.child_id,
+    role: finalRole,
+    accepted_at: acceptedAt
+  });
   const ownerPhone = await findChildOwnerPhone(invite.child_id, tenantId);
   if (ownerPhone && ownerPhone !== userPhone) {
     await sendMessage(ownerPhone, `✅ Invite accepted\n📱 ${userPhone}\n👤 Role: ${finalRole}`);
@@ -499,6 +586,7 @@ async function handleInviteReject(userPhone, tenantId) {
   }
   const invite = pending[0];
   const role = pendingTargetRole(invite.role) || 'member';
+  const rejectedAt = new Date().toISOString();
   const { error } = await supabase
     .from('child_members')
     .delete()
@@ -507,6 +595,11 @@ async function handleInviteReject(userPhone, tenantId) {
     await sendMessage(userPhone, `Could not reject invite: ${error.message}`);
     return;
   }
+  await recordConsentEvent(userPhone, tenantId, 'invite_rejected', {
+    child_id: invite.child_id,
+    role,
+    rejected_at: rejectedAt
+  });
   const ownerPhone = await findChildOwnerPhone(invite.child_id, tenantId);
   if (ownerPhone && ownerPhone !== userPhone) {
     await sendMessage(ownerPhone, `❌ Invite rejected\n📱 ${userPhone}\n👤 Role: ${role}`);
@@ -967,31 +1060,257 @@ async function handleReconcilePayment(userPhone, paymentId, user, tenantId) {
   }
 }
 
+async function markUserInboundSeen(userPhone, tenantId) {
+  const nowIso = new Date().toISOString();
+  try {
+    const { error } = await supabase
+      .from('users')
+      .update({ has_initiated_chat: true, last_inbound_at: nowIso })
+      .match(userMatch(tenantId, userPhone));
+    if (error && !/(has_initiated_chat|last_inbound_at|users)/i.test(error.message || '')) {
+      console.error('users inbound marker update error:', error.message);
+    }
+  } catch (_) {
+  }
+}
+
+async function getInitiatedChatMap(phones, tenantId) {
+  const map = new Map();
+  const list = Array.from(new Set((phones || []).map((p) => String(p || '').trim()).filter(Boolean)));
+  if (!list.length) return map;
+  try {
+    let { data, error } = await supabase
+      .from('users')
+      .select('phone,has_initiated_chat,last_inbound_at')
+      .match(withTenant(tenantId, {}))
+      .in('phone', list)
+      .limit(Math.max(50, list.length * 2));
+    if (error && /(has_initiated_chat|last_inbound_at)/i.test(error.message || '')) {
+      const fallback = await supabase
+        .from('users')
+        .select('phone')
+        .match(withTenant(tenantId, {}))
+        .in('phone', list)
+        .limit(Math.max(50, list.length * 2));
+      data = fallback.data;
+      error = fallback.error;
+      if (!error) {
+        for (const row of (data || [])) {
+          const phone = String(row?.phone || '').trim();
+          if (!phone) continue;
+          map.set(phone, { initiated: null, lastInboundAt: null });
+        }
+      }
+      return map;
+    }
+    if (error) return map;
+    for (const row of (data || [])) {
+      const phone = String(row?.phone || '').trim();
+      if (!phone) continue;
+      map.set(phone, {
+        initiated: row?.has_initiated_chat === true,
+        lastInboundAt: row?.last_inbound_at || null
+      });
+    }
+  } catch (_) {
+  }
+  return map;
+}
+
+async function getInviteAuditByMember(phones, tenantId, childIds = []) {
+  const map = new Map();
+  const memberPhones = Array.from(new Set((phones || []).map((p) => String(p || '').trim()).filter(Boolean)));
+  if (!memberPhones.length) return map;
+  try {
+    let query = supabase
+      .from('consent_events')
+      .select('user_phone,event_type,details,created_at')
+      .match(withTenant(tenantId, {}))
+      .in('user_phone', memberPhones)
+      .in('event_type', ['invite_created', 'invite_sent', 'invite_template_sent', 'invite_failed', 'invite_accepted', 'invite_rejected'])
+      .order('created_at', { ascending: false })
+      .limit(1000);
+    const { data, error } = await query;
+    if (error) return map;
+    for (const row of (data || [])) {
+      const phone = String(row?.user_phone || '').trim();
+      if (!phone) continue;
+      const details = row?.details && typeof row.details === 'object' ? row.details : {};
+      const childId = String(details.child_id || '');
+      const key = `${childId}:${phone}`;
+      const slot = map.get(key) || {
+        sentAt: null,
+        sentChannel: '',
+        failedAt: null,
+        failedReason: '',
+        acceptedAt: null,
+        rejectedAt: null
+      };
+      const ev = String(row?.event_type || '').trim();
+      const at = row?.created_at || null;
+      if (!slot.sentAt && (ev === 'invite_sent' || ev === 'invite_template_sent')) {
+        slot.sentAt = at;
+        slot.sentChannel = ev === 'invite_template_sent' ? 'template' : 'session';
+      }
+      if (!slot.failedAt && ev === 'invite_failed') {
+        slot.failedAt = at;
+        slot.failedReason = String(details.error || details.reason || '').trim();
+      }
+      if (!slot.acceptedAt && ev === 'invite_accepted') slot.acceptedAt = at;
+      if (!slot.rejectedAt && ev === 'invite_rejected') slot.rejectedAt = at;
+      map.set(key, slot);
+    }
+  } catch (_) {
+  }
+  return map;
+}
+
+function memberStatusText(memberRow, initiatedInfo, inviteAudit) {
+  const role = normalizeRole(memberRow?.role || 'member');
+  const pending = isPendingRole(role);
+  const labelRole = pending ? `pending ${pendingTargetRole(role)}` : role;
+  const initiatedRaw = initiatedInfo ? initiatedInfo.initiated : null;
+  const initiated = initiatedRaw === true;
+  const acceptedAt = memberRow?.invite_accepted_at || inviteAudit?.acceptedAt || null;
+  const sentAt = memberRow?.invite_sent_at || inviteAudit?.sentAt || null;
+  const deliveryStatus = String(memberRow?.invite_delivery_status || '').trim();
+  const failedReason = String(memberRow?.invite_error || inviteAudit?.failedReason || '').trim();
+  const chatState = initiatedRaw === null || typeof initiatedRaw === 'undefined'
+    ? 'chat_unknown'
+    : (initiated ? 'chat_opened' : 'chat_not_started');
+  const sentLabel = sentAt ? `sent:${formatIsoDate(sentAt)}` : 'sent:na';
+  const acceptedLabel = acceptedAt ? `accepted:${formatIsoDate(acceptedAt)}` : (pending ? 'accepted:pending' : 'accepted:na');
+  const deliveryLabel = deliveryStatus || (inviteAudit?.sentChannel ? `sent_${inviteAudit.sentChannel}` : (inviteAudit?.failedAt ? 'failed' : 'na'));
+  const failLabel = failedReason ? ` fail:${truncateText(failedReason, 80)}` : '';
+  return `${labelRole} | ${chatState} | ${sentLabel} | ${acceptedLabel} | delivery:${deliveryLabel}${failLabel}`;
+}
+
+async function getChildProfile(userPhone, tenantId) {
+  const childId = await getOrCreateDefaultChild(userPhone, tenantId);
+  if (!childId) return null;
+  try {
+    const { data, error } = await supabase
+      .from('children')
+      .select('id,name,created_by,created_at')
+      .match(withTenant(tenantId, { id: childId }))
+      .limit(1);
+    if (error) return null;
+    const row = Array.isArray(data) && data.length ? data[0] : null;
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: String(row.name || 'Child tracker').trim(),
+      createdBy: String(row.created_by || '').trim(),
+      createdAt: row.created_at || null
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function handleChildProfile(userPhone, tenantId) {
+  const profile = await getChildProfile(userPhone, tenantId);
+  if (!profile) {
+    await sendMessage(userPhone, 'Could not load child profile.');
+    return;
+  }
+  await sendMessage(
+    userPhone,
+    `👶 CHILD PROFILE\n` +
+    `Name: ${profile.name}\n` +
+    `ID: ${profile.id}\n` +
+    `${profile.createdBy ? `Owner: ${profile.createdBy}\n` : ''}` +
+    `${profile.createdAt ? `Created: ${formatIsoDate(profile.createdAt)}\n` : ''}` +
+    `To rename: child_name <new name>`
+  );
+}
+
+async function handleChildRename(userPhone, tenantId, newNameRaw) {
+  const profile = await getChildProfile(userPhone, tenantId);
+  if (!profile?.id) {
+    await sendMessage(userPhone, 'Could not load child profile.');
+    return false;
+  }
+  const newName = String(newNameRaw || '').trim().replace(/\s+/g, ' ');
+  if (!newName || newName.length < 2 || newName.length > 60) {
+    await sendMessage(userPhone, 'Invalid child name. Use 2-60 characters.');
+    return false;
+  }
+  const { error } = await supabase
+    .from('children')
+    .update({ name: newName })
+    .match(withTenant(tenantId, { id: profile.id }));
+  if (error) {
+    await sendMessage(userPhone, `Could not update child name: ${error.message}`);
+    return false;
+  }
+  await sendMessage(userPhone, `✅ Child name updated\n${profile.name} -> ${newName}`);
+  await recordConsentEvent(userPhone, tenantId, 'child_profile_updated', {
+    child_id: profile.id,
+    old_name: profile.name,
+    new_name: newName
+  });
+  return true;
+}
+
+async function notifyChildMembers(tenantId, childId, actorPhone, messageText) {
+  if (!childId || !messageText) return;
+  try {
+    const { data, error } = await supabase
+      .from('child_members')
+      .select('member_phone,role')
+      .match(withTenant(tenantId, { child_id: childId }));
+    if (error) return;
+    const recipients = (data || [])
+      .map((row) => ({ phone: String(row?.member_phone || '').trim(), role: normalizeRole(row?.role || '') }))
+      .filter((row) => row.phone && row.phone !== actorPhone && !isPendingRole(row.role));
+    for (const row of recipients) {
+      await sendMessage(row.phone, messageText);
+    }
+  } catch (_) {
+  }
+}
+
 async function handleMembersList(userPhone, tenantId) {
   const childId = await getOrCreateDefaultChild(userPhone, tenantId);
   if (!childId) {
     await sendMessage(userPhone, 'Could not load members.');
     return;
   }
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('child_members')
-    .select('member_phone,role')
+    .select('member_phone,role,invite_sent_at,invite_delivery_status,invite_error,invite_accepted_at')
     .match(withTenant(tenantId, { child_id: childId }))
     .order('created_at', { ascending: true });
+  if (error && /(invite_sent_at|invite_delivery_status|invite_error|invite_accepted_at)/i.test(error.message || '')) {
+    const fallback = await supabase
+      .from('child_members')
+      .select('member_phone,role')
+      .match(withTenant(tenantId, { child_id: childId }))
+      .order('created_at', { ascending: true });
+    data = fallback.data;
+    error = fallback.error;
+  }
   if (error) {
     await sendMessage(userPhone, 'Could not load members.');
     return;
   }
-  const rows = (data || []).map((m) => {
-    const role = normalizeRole(m.role || 'member');
-    const label = isPendingRole(role) ? `pending ${pendingTargetRole(role)}` : role;
-    return `- ${label}: ${String(m.member_phone || '')}`;
+  const members = Array.isArray(data) ? data : [];
+  const phones = members.map((m) => String(m.member_phone || '').trim()).filter(Boolean);
+  const initiatedMap = await getInitiatedChatMap(phones, tenantId);
+  const auditMap = await getInviteAuditByMember(phones, tenantId, [childId]);
+  const rows = members.map((m) => {
+    const phone = String(m.member_phone || '').trim();
+    const audit = auditMap.get(`${childId}:${phone}`) || null;
+    const initiated = initiatedMap.get(phone) || null;
+    return `- ${phone} | ${memberStatusText(m, initiated, audit)}`;
   });
   if (!rows.length) {
     await sendMessage(userPhone, 'No members linked yet.');
     return;
   }
-  await sendMessage(userPhone, `MEMBERS\n${rows.join('\n')}`);
+  const child = await getChildProfile(userPhone, tenantId);
+  await sendMessage(userPhone, `MEMBERS (${child?.name || `Child ${childId}`})\n${rows.join('\n')}`);
 }
 
 async function handleAddMember(userPhone, tenantId, role, rawPhone) {
@@ -1016,9 +1335,20 @@ async function handleAddMember(userPhone, tenantId, role, rawPhone) {
     return;
   }
   const inviteContext = await getChildInviteContext(childId, tenantId, userPhone);
+  const targetRole = normalizeRole(role) === 'therapist' ? 'therapist' : 'parent';
+  const pendingRole = `pending_${targetRole}`;
+  const nowIso = new Date().toISOString();
 
   const ensured = await ensureUserExists(normalized, tenantId);
   if (!ensured?.ok) {
+    await recordConsentEvent(userPhone, tenantId, 'invite_failed', {
+      child_id: childId,
+      role: targetRole,
+      inviter_phone: userPhone,
+      member_phone: normalized,
+      reason: 'member_user_missing',
+      ensure_reason: String(ensured?.reason || 'unknown')
+    });
     await sendMessage(
       userPhone,
       `Could not add member yet for ${normalized}.\n` +
@@ -1032,8 +1362,7 @@ async function handleAddMember(userPhone, tenantId, role, rawPhone) {
     .select('id,role')
     .match(memberMatch)
     .limit(1);
-  const targetRole = normalizeRole(role) === 'therapist' ? 'therapist' : 'parent';
-  const pendingRole = `pending_${targetRole}`;
+
   if (Array.isArray(existing) && existing.length) {
     const existingId = existing[0].id;
     const existingRole = normalizeRole(existing[0].role || '');
@@ -1043,10 +1372,47 @@ async function handleAddMember(userPhone, tenantId, role, rawPhone) {
     }
     if (isPendingRole(existingRole)) {
       await supabase.from('child_members').update({ role: pendingRole }).match(withTenant(tenantId, { id: existingId }));
+      await updateInviteMetaByMemberId(existingId, tenantId, {
+        invited_by: userPhone,
+        invite_sent_at: nowIso,
+        invite_delivery_status: 'pending',
+        invite_error: null
+      });
+      await recordConsentEvent(normalized, tenantId, 'invite_created', {
+        child_id: childId,
+        role: targetRole,
+        inviter_phone: userPhone,
+        member_id: existingId
+      });
       const delivery = await sendInviteToMember(normalized, targetRole, inviteContext);
       if (delivery.ok) {
+        const sentEvent = delivery.channel === 'template' ? 'invite_template_sent' : 'invite_sent';
+        await updateInviteMetaByMemberId(existingId, tenantId, {
+          invite_sent_at: nowIso,
+          invite_delivery_status: delivery.channel === 'template' ? 'template_sent' : 'sent',
+          invite_error: null
+        });
+        await recordConsentEvent(normalized, tenantId, sentEvent, {
+          child_id: childId,
+          role: targetRole,
+          inviter_phone: userPhone,
+          channel: delivery.channel || 'session',
+          message_id: delivery.messageId || null
+        });
         await sendMessage(userPhone, `Invite is pending for ${normalized} as ${targetRole}.`);
       } else {
+        await updateInviteMetaByMemberId(existingId, tenantId, {
+          invite_sent_at: nowIso,
+          invite_delivery_status: 'failed',
+          invite_error: String(delivery.error || '').slice(0, 400)
+        });
+        await recordConsentEvent(normalized, tenantId, 'invite_failed', {
+          child_id: childId,
+          role: targetRole,
+          inviter_phone: userPhone,
+          channel: 'session_or_template',
+          error: String(delivery.error || 'invite_delivery_failed')
+        });
         await sendMessage(
           userPhone,
           `Invite is saved for ${normalized} as ${targetRole}, but WhatsApp could not deliver now.\n` +
@@ -1064,9 +1430,16 @@ async function handleAddMember(userPhone, tenantId, role, rawPhone) {
     member_phone: normalized,
     role: pendingRole
   });
-  const { error } = await supabase.from('child_members').insert(row);
+  const { data: insertedRows, error } = await supabase.from('child_members').insert(row).select('id');
   if (error) {
     if (String(error.code) === '23503' || /child_members_member_phone_fkey|foreign key/i.test(String(error.message || ''))) {
+      await recordConsentEvent(normalized, tenantId, 'invite_failed', {
+        child_id: childId,
+        role: targetRole,
+        inviter_phone: userPhone,
+        reason: 'fk_user_missing',
+        error: String(error.message || '')
+      });
       await sendMessage(
         userPhone,
         `Could not add member yet for ${normalized}.\n` +
@@ -1074,17 +1447,63 @@ async function handleAddMember(userPhone, tenantId, role, rawPhone) {
       );
       return;
     }
+    await recordConsentEvent(normalized, tenantId, 'invite_failed', {
+      child_id: childId,
+      role: targetRole,
+      inviter_phone: userPhone,
+      reason: 'insert_failed',
+      error: String(error.message || '')
+    });
     await sendMessage(userPhone, `Could not add member right now. Please retry.`);
     return;
   }
+  const insertedId = Array.isArray(insertedRows) && insertedRows[0]?.id ? insertedRows[0].id : null;
+  await updateInviteMetaByMemberId(insertedId, tenantId, {
+    invited_by: userPhone,
+    invite_sent_at: nowIso,
+    invite_delivery_status: 'pending',
+    invite_error: null
+  });
+  await recordConsentEvent(normalized, tenantId, 'invite_created', {
+    child_id: childId,
+    role: targetRole,
+    inviter_phone: userPhone,
+    member_id: insertedId
+  });
   const delivery = await sendInviteToMember(normalized, targetRole, inviteContext);
   if (delivery.ok) {
+    const sentEvent = delivery.channel === 'template' ? 'invite_template_sent' : 'invite_sent';
+    await updateInviteMetaByMemberId(insertedId, tenantId, {
+      invite_sent_at: nowIso,
+      invite_delivery_status: delivery.channel === 'template' ? 'template_sent' : 'sent',
+      invite_error: null
+    });
+    await recordConsentEvent(normalized, tenantId, sentEvent, {
+      child_id: childId,
+      role: targetRole,
+      inviter_phone: userPhone,
+      channel: delivery.channel || 'session',
+      message_id: delivery.messageId || null
+    });
     await sendMessage(
       userPhone,
       `Invite sent for ${targetRole}: ${normalized}\n` +
-      `They must accept before getting access.`
+      `They must accept before getting access.` +
+      `${delivery.channel === 'template' ? `\nTemplate used for first-time delivery.` : ''}`
     );
   } else {
+    await updateInviteMetaByMemberId(insertedId, tenantId, {
+      invite_sent_at: nowIso,
+      invite_delivery_status: 'failed',
+      invite_error: String(delivery.error || '').slice(0, 400)
+    });
+    await recordConsentEvent(normalized, tenantId, 'invite_failed', {
+      child_id: childId,
+      role: targetRole,
+      inviter_phone: userPhone,
+      channel: 'session_or_template',
+      error: String(delivery.error || 'invite_delivery_failed')
+    });
     await sendMessage(
       userPhone,
       `Invite created for ${targetRole}: ${normalized}\n` +
@@ -1690,11 +2109,18 @@ async function handleClinicAdminOverview(userPhone, user, tenantId) {
   const members = Array.isArray(membersRes.data) ? membersRes.data : [];
   const sessions = Array.isArray(sessionsRes.data) ? sessionsRes.data : [];
   const uniqueMembers = new Set(members.map((m) => String(m.member_phone || '').trim()).filter(Boolean));
+  const initiatedMap = await getInitiatedChatMap(Array.from(uniqueMembers), tenantId);
   const roleCount = new Map();
   for (const m of members) {
     const role = normalizeRole(m.role || 'member');
     roleCount.set(role, (roleCount.get(role) || 0) + 1);
   }
+  const pendingInvites = members.filter((m) => isPendingRole(m.role || '')).length;
+  const neverOpened = Array.from(uniqueMembers).filter((phone) => initiatedMap.get(phone)?.initiated === false).length;
+  const chatUnknown = Array.from(uniqueMembers).filter((phone) => {
+    const v = initiatedMap.get(phone)?.initiated;
+    return v === null || typeof v === 'undefined';
+  }).length;
   const attended = sessions.filter((s) => s.status === 'attended').length;
   const missed = sessions.filter((s) => s.status === 'cancelled').length;
   const activeChildren = new Set(sessions.map((s) => s.child_id)).size;
@@ -1702,10 +2128,13 @@ async function handleClinicAdminOverview(userPhone, user, tenantId) {
     userPhone,
     `🏥 CLINIC ADMIN (${month})\n` +
     `👶 Children: ${childIds.length}\n` +
-    `👥 Members: ${uniqueMembers.size}\n` +
-    `- Parents: ${roleCount.get('parent') || 0}\n` +
-    `- Therapists: ${roleCount.get('therapist') || 0}\n` +
-    `✅ Attended logs: ${attended}\n` +
+      `👥 Members: ${uniqueMembers.size}\n` +
+      `- Parents: ${roleCount.get('parent') || 0}\n` +
+      `- Therapists: ${roleCount.get('therapist') || 0}\n` +
+      `- Pending invites: ${pendingInvites}\n` +
+      `- Chat not started: ${neverOpened}\n` +
+      `- Chat unknown: ${chatUnknown}\n` +
+      `✅ Attended logs: ${attended}\n` +
     `❌ Missed logs: ${missed}\n` +
     `📌 Active children this month: ${activeChildren}\n` +
     `Commands: admin_members, admin_risk`
@@ -1720,13 +2149,24 @@ async function handleClinicAdminMembers(userPhone, tenantId) {
     await sendQuickMenu(userPhone, tenantId);
     return;
   }
-  const { data: rows, error } = await supabase
+  let { data: rows, error } = await supabase
     .from('child_members')
-    .select('child_id,member_phone,role,created_at')
+    .select('child_id,member_phone,role,created_at,invite_sent_at,invite_delivery_status,invite_error,invite_accepted_at')
     .match(withTenant(tenantId, {}))
     .in('child_id', childIds)
     .order('created_at', { ascending: true })
     .limit(200);
+  if (error && /(invite_sent_at|invite_delivery_status|invite_error|invite_accepted_at)/i.test(error.message || '')) {
+    const fallback = await supabase
+      .from('child_members')
+      .select('child_id,member_phone,role,created_at')
+      .match(withTenant(tenantId, {}))
+      .in('child_id', childIds)
+      .order('created_at', { ascending: true })
+      .limit(200);
+    rows = fallback.data;
+    error = fallback.error;
+  }
   if (error) {
     await sendMessage(userPhone, `Could not fetch members: ${error.message}`);
     await sendQuickMenu(userPhone, tenantId);
@@ -1743,15 +2183,34 @@ async function handleClinicAdminMembers(userPhone, tenantId) {
     const role = normalizeRole(row.role || 'member');
     roleCount.set(role, (roleCount.get(role) || 0) + 1);
   }
+  const phones = list.map((r) => String(r.member_phone || '').trim()).filter(Boolean);
+  const initiatedMap = await getInitiatedChatMap(phones, tenantId);
+  const auditMap = await getInviteAuditByMember(phones, tenantId, childIds);
   const preview = list.slice(0, 15).map((row) => {
-    const role = normalizeRole(row.role || 'member');
-    return `C${row.child_id} ${role}: ${row.member_phone}`;
+    const phone = String(row.member_phone || '').trim();
+    const initiated = initiatedMap.get(phone) || null;
+    const audit = auditMap.get(`${row.child_id}:${phone}`) || null;
+    return `C${row.child_id} ${phone} | ${memberStatusText(row, initiated, audit)}`;
   }).join('\n');
+  const pendingCount = list.filter((row) => isPendingRole(row.role || '')).length;
+  const neverOpenedCount = list.filter((row) => {
+    const phone = String(row.member_phone || '').trim();
+    if (!phone) return false;
+    const initiated = initiatedMap.get(phone);
+    return initiated?.initiated === false;
+  }).length;
+  const unknownChatCount = list.filter((row) => {
+    const phone = String(row.member_phone || '').trim();
+    if (!phone) return false;
+    const initiated = initiatedMap.get(phone);
+    return initiated?.initiated === null || typeof initiated?.initiated === 'undefined';
+  }).length;
   await sendMessage(
     userPhone,
-    `👥 CLINIC MEMBERS\n` +
-    `Owners: ${roleCount.get('owner') || 0}, Parents: ${roleCount.get('parent') || 0}, Therapists: ${roleCount.get('therapist') || 0}\n` +
-    `${preview}\n` +
+      `👥 CLINIC MEMBERS\n` +
+      `Owners: ${roleCount.get('owner') || 0}, Parents: ${roleCount.get('parent') || 0}, Therapists: ${roleCount.get('therapist') || 0}\n` +
+      `Pending invites: ${pendingCount}, Chat not started: ${neverOpenedCount}, Chat unknown: ${unknownChatCount}\n` +
+      `${preview}\n` +
     `${list.length > 15 ? `...and ${list.length - 15} more` : ''}`
   );
   await sendQuickMenu(userPhone, tenantId);
@@ -2191,7 +2650,7 @@ async function handleMessage(userPhone, message, tenantId) {
     }
 
     if (!user) {
-      await createUser(userPhone, tenant);
+      await createUser(userPhone, tenant, { initiatedChat: true });
       await sendMessage(userPhone,
         `👋 Welcome to Therapy Tracker\n` +
         `⚙️ Type 'setup' to begin`
@@ -2199,6 +2658,7 @@ async function handleMessage(userPhone, message, tenantId) {
       await sendQuickMenu(userPhone, tenant);
       return;
     }
+    await markUserInboundSeen(userPhone, tenant);
 
     const command = String(message || '').trim().toLowerCase();
     const memberContext = await resolveMemberContext(userPhone, tenant);
@@ -2359,6 +2819,25 @@ async function handleMessage(userPhone, message, tenantId) {
       await sendQuickMenu(userPhone, tenant);
       return;
     }
+    if (command === 'child_profile' || command === 'child') {
+      if (!await requirePermission('members_view')) return;
+      await handleChildProfile(userPhone, tenant);
+      await sendQuickMenu(userPhone, tenant);
+      return;
+    }
+    const childRenameMatch = command.match(/^(?:child_name|rename_child|set_child_name)\s+(.+)$/);
+    if (childRenameMatch) {
+      if (!await requirePermission('setup')) return;
+      await handleChildRename(userPhone, tenant, childRenameMatch[1]);
+      await sendQuickMenu(userPhone, tenant);
+      return;
+    }
+    if (command === 'child_name' || command === 'rename_child' || command === 'set_child_name') {
+      if (!await requirePermission('setup')) return;
+      await supabase.from('users').update({ waiting_for: 'child_name_update' }).match(userMatch(tenant, userPhone));
+      await sendMessage(userPhone, 'Send new child name (2-60 chars).\nExample: child_name Arjun');
+      return;
+    }
     if (command === 'language' || command === 'lang') {
       const locale = readUserLocale(user);
       await sendMessage(userPhone, i18nText(locale, 'language_prompt'));
@@ -2427,16 +2906,28 @@ async function handleMessage(userPhone, message, tenantId) {
       await sendInviteTypePicker(userPhone);
       return;
     }
+    if (command === 'invite_help' || command === 'share_bot' || command === 'bot_number') {
+      const publicNumber = String(config.WHATSAPP_PUBLIC_NUMBER || '').replace(/\D/g, '');
+      const joinLink = buildInviteJoinLink();
+      await sendMessage(
+        userPhone,
+        `Invite onboarding\n` +
+        `${publicNumber ? `Bot number: ${publicNumber}\n` : ''}` +
+        `${joinLink ? `Share this with parent/therapist:\n${joinLink}\n` : ''}` +
+        `They should send "hi", then you can run add_parent <phone> or add_therapist <phone>.`
+      );
+      return;
+    }
     if (command === 'invite_parent') {
       if (!await requirePermission('members_manage')) return;
       await supabase.from('users').update({ waiting_for: 'invite_parent_phone' }).match(userMatch(tenant, userPhone));
-      await sendMessage(userPhone, 'Send parent phone with country code.\nExample: 919876543210');
+      await sendMessage(userPhone, `Send parent phone with country code.\nExample: 919876543210\n${inviteRetryHint()}`);
       return;
     }
     if (command === 'invite_therapist') {
       if (!await requirePermission('members_manage')) return;
       await supabase.from('users').update({ waiting_for: 'invite_therapist_phone' }).match(userMatch(tenant, userPhone));
-      await sendMessage(userPhone, 'Send therapist phone with country code.\nExample: 919876543210');
+      await sendMessage(userPhone, `Send therapist phone with country code.\nExample: 919876543210\n${inviteRetryHint()}`);
       return;
     }
     const addParentMatch = command.match(/^add_parent\s+(.+)$/);
@@ -2721,6 +3212,12 @@ async function handleMessage(userPhone, message, tenantId) {
         await sendQuickMenu(userPhone, tenant);
         return;
       }
+      if (intent === 'CHILD_PROFILE') {
+        if (!await requirePermission('members_view')) return;
+        await handleChildProfile(userPhone, tenant);
+        await sendQuickMenu(userPhone, tenant);
+        return;
+      }
       if (intent === 'INVITE_MEMBER') {
         if (!await requirePermission('members_manage')) return;
         await sendInviteTypePicker(userPhone);
@@ -2893,13 +3390,21 @@ async function handleMessage(userPhone, message, tenantId) {
   }
 }
 
-async function createUser(phone, tenantId) {
-  const row = withTenant(tenantId, {
+async function createUser(phone, tenantId, options = {}) {
+  const initiatedChat = options && options.initiatedChat === true;
+  const baseRow = withTenant(tenantId, {
     phone: phone,
     reminder_time_hour: config.DEFAULT_REMINDER_HOUR,
     created_at: new Date().toISOString()
   });
-  const { error } = await supabase.from('users').insert(row);
+  const enrichedRow = initiatedChat
+    ? { ...baseRow, has_initiated_chat: true, last_inbound_at: new Date().toISOString() }
+    : baseRow;
+  let { error } = await supabase.from('users').insert(enrichedRow);
+  if (error && /(has_initiated_chat|last_inbound_at)/i.test(error.message || '')) {
+    const retry = await supabase.from('users').insert(baseRow);
+    error = retry.error || null;
+  }
   if (error) {
     console.error('Supabase users insert error:', error.message);
     return { ok: false, error };
@@ -3215,6 +3720,24 @@ async function handleWaitingResponse(userPhone, message, user, tenantId, memberR
     return true;
   }
 
+  if (user.waiting_for === 'child_name_update') {
+    if (!can('setup')) {
+      await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
+      await sendMessage(userPhone, permissionDeniedText(memberRole, 'setup'));
+      await sendQuickMenu(userPhone, tenantId);
+      return true;
+    }
+    const nextName = String(message || '').trim();
+    if (!nextName) {
+      await sendMessage(userPhone, 'Send child name. Example: Arjun');
+      return true;
+    }
+    await handleChildRename(userPhone, tenantId, nextName);
+    await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
+    await sendQuickMenu(userPhone, tenantId);
+    return true;
+  }
+
   if (user.waiting_for === 'delete_data_confirm') {
     if (!can('data')) {
       await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
@@ -3331,6 +3854,13 @@ async function handleWaitingResponse(userPhone, message, user, tenantId, memberR
     if (insErr) console.error('Supabase sessions insert cancel error:', insErr.message);
     await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
     await sendMessage(userPhone, `❌ Missed logged\n🗓️ ${date}\n📝 ${reason}`);
+    const childCtx = await getChildInviteContext(childId, tenantId, userPhone);
+    await notifyChildMembers(
+      tenantId,
+      childId,
+      userPhone,
+      `❌ Missed logged\nChild: ${childCtx.childName}\nDate: ${date}\nReason: ${truncateText(String(reason), 120)}\nBy: ${userPhone}`
+    );
     await sendQuickMenu(userPhone, tenantId);
     return true;
   }
@@ -3338,12 +3868,17 @@ async function handleWaitingResponse(userPhone, message, user, tenantId, memberR
   if (user.waiting_for === 'cancellation_reason') {
     const tz = await getUserTimeZone(userPhone, tenantId);
     const { today, month: currentMonth } = nowPartsInTimeZone(tz);
+    const childId = await getOrCreateDefaultChild(userPhone, tenantId);
+    const reasonText = extractVoiceNote(message) || message;
 
     const { error: canErr } = await supabase.from('sessions').insert(withTenant(tenantId, {
       user_phone: userPhone,
+      child_id: childId,
+      logged_by: userPhone,
+      sessions_done: 1,
       date: today,
       status: 'cancelled',
-      reason: extractVoiceNote(message) || message,
+      reason: reasonText,
       month: currentMonth
     }));
     if (canErr) {
@@ -3361,7 +3896,14 @@ async function handleWaitingResponse(userPhone, message, user, tenantId, memberR
     await sendMessage(userPhone,
       `❌ Missed logged\n` +
       `🗓️ ${today}\n` +
-      `📝 ${extractVoiceNote(message) || message}`
+      `📝 ${reasonText}`
+    );
+    const childCtx = await getChildInviteContext(childId, tenantId, userPhone);
+    await notifyChildMembers(
+      tenantId,
+      childId,
+      userPhone,
+      `❌ Missed logged\nChild: ${childCtx.childName}\nDate: ${today}\nReason: ${truncateText(String(reasonText), 120)}\nBy: ${userPhone}`
     );
     return true;
   }
@@ -4039,9 +4581,22 @@ async function insertSessionsWithFallback({ userPhone, childId, date, count, sta
     ...(reason ? { reason } : {})
   })));
   const { error } = await supabase.from('sessions').insert(rows);
+  let insertedOk = !error;
   if (error) {
     const minimal = rows.map(r => withTenant(tenantId, ({ user_phone: r.user_phone, date: r.date, status: r.status, month: r.month, ...(reason ? { reason } : {}) })));
-    await supabase.from('sessions').insert(minimal);
+    const retry = await supabase.from('sessions').insert(minimal);
+    insertedOk = !retry.error;
+  }
+  if (insertedOk) {
+    const childContext = await getChildInviteContext(childId, tenantId, userPhone);
+    const action = status === 'attended' ? '✅ Attended logged' : '❌ Missed logged';
+    const reasonText = reason ? `\nReason: ${truncateText(String(reason), 120)}` : '';
+    await notifyChildMembers(
+      tenantId,
+      childId,
+      userPhone,
+      `${action}\nChild: ${childContext.childName}\nDate: ${date}\nCount: ${count}${reasonText}\nBy: ${userPhone}`
+    );
   }
 }
 
@@ -4068,6 +4623,7 @@ function parseIntent(text) {
   if (/(\bplan\b|\bmy\s+plan\b)/.test(t)) return { intent: 'PLAN' };
   if (/(\bpayment\s+status\b|\bbilling\s+status\b)/.test(t)) return { intent: 'PAYMENT_STATUS' };
   if (/(\binvite\b|\badd\s+parent\b|\badd\s+therapist\b)/.test(t)) return { intent: 'INVITE_MEMBER' };
+  if (/(\bchild\s+profile\b|\bchild\s+name\b|\brename\s+child\b)/.test(t)) return { intent: 'CHILD_PROFILE' };
   if (/(\bexport\b.*\bdata\b|\bdata\s*export\b)/.test(t)) return { intent: 'EXPORT_DATA' };
   if (/(\bdelete\b.*\bdata\b|\berase\b.*\bdata\b)/.test(t)) return { intent: 'DELETE_DATA' };
   if (/(\bmembers\b|\bteam\b)/.test(t)) return { intent: 'MEMBERS' };

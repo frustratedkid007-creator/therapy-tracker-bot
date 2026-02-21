@@ -41,6 +41,8 @@ const config = {
   WHATSAPP_TOKEN: process.env.WHATSAPP_TOKEN,
   PHONE_NUMBER_ID: process.env.PHONE_NUMBER_ID,
   WHATSAPP_PUBLIC_NUMBER: process.env.WHATSAPP_PUBLIC_NUMBER || '',
+  INVITE_TEMPLATE_NAME: process.env.INVITE_TEMPLATE_NAME || '',
+  INVITE_TEMPLATE_LANG: process.env.INVITE_TEMPLATE_LANG || 'en',
   VERIFY_TOKEN: process.env.VERIFY_TOKEN || 'therapy_tracker_2025',
   WHATSAPP_APP_SECRET: process.env.WHATSAPP_APP_SECRET,
   DEFAULT_TIMEZONE: process.env.DEFAULT_TIMEZONE || 'Asia/Kolkata',
