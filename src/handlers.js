@@ -23,6 +23,7 @@ const {
   sendSetupPresets,
   sendSetupMode,
   sendYesNo,
+  sendInviteTypePicker,
   sendVoiceNotePrompt,
   sendMoodPicker
 } = require('./whatsapp');
@@ -680,6 +681,20 @@ async function handleMessage(userPhone, message, tenantId) {
       await sendQuickMenu(userPhone, tenant);
       return;
     }
+    if (command === 'invite_member' || command === 'invite') {
+      await sendInviteTypePicker(userPhone);
+      return;
+    }
+    if (command === 'invite_parent') {
+      await supabase.from('users').update({ waiting_for: 'invite_parent_phone' }).match(userMatch(tenant, userPhone));
+      await sendMessage(userPhone, 'Send parent phone with country code.\nExample: 919876543210');
+      return;
+    }
+    if (command === 'invite_therapist') {
+      await supabase.from('users').update({ waiting_for: 'invite_therapist_phone' }).match(userMatch(tenant, userPhone));
+      await sendMessage(userPhone, 'Send therapist phone with country code.\nExample: 919876543210');
+      return;
+    }
     const addParentMatch = command.match(/^add_parent\s+(.+)$/);
     if (addParentMatch) {
       await handleAddMember(userPhone, tenant, 'parent', addParentMatch[1]);
@@ -817,6 +832,10 @@ async function handleMessage(userPhone, message, tenantId) {
         await sendQuickMenu(userPhone, tenant);
         return;
       }
+      if (intent === 'INVITE_MEMBER') {
+        await sendInviteTypePicker(userPhone);
+        return;
+      }
     }
 
     if (message.startsWith('missed_date:')) {
@@ -909,6 +928,8 @@ async function handleMessage(userPhone, message, tenantId) {
     } else if (message.includes('members') || message.includes('team')) {
       await handleMembersList(userPhone, tenant);
       await sendQuickMenu(userPhone, tenant);
+    } else if (message.includes('invite')) {
+      await sendInviteTypePicker(userPhone);
     } else if (message.includes('status')) {
       await handleStatus(userPhone, user, tenant);
     } else if (message.includes('weekly')) {
@@ -1081,6 +1102,30 @@ async function handleWaitingResponse(userPhone, message, user, tenantId) {
     } else {
       await sendMessage(userPhone, `Mood note saved`);
     }
+    await sendQuickMenu(userPhone, tenantId);
+    return true;
+  }
+
+  if (user.waiting_for === 'invite_parent_phone') {
+    const phone = normalizeMemberPhone(message);
+    if (!phone) {
+      await sendMessage(userPhone, 'Invalid phone. Example: 919876543210');
+      return true;
+    }
+    await handleAddMember(userPhone, tenantId, 'parent', phone);
+    await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
+    await sendQuickMenu(userPhone, tenantId);
+    return true;
+  }
+
+  if (user.waiting_for === 'invite_therapist_phone') {
+    const phone = normalizeMemberPhone(message);
+    if (!phone) {
+      await sendMessage(userPhone, 'Invalid phone. Example: 919876543210');
+      return true;
+    }
+    await handleAddMember(userPhone, tenantId, 'therapist', phone);
+    await supabase.from('users').update({ waiting_for: null }).match(userMatch(tenantId, userPhone));
     await sendQuickMenu(userPhone, tenantId);
     return true;
   }
@@ -1851,6 +1896,7 @@ async function insertSessionsWithFallback({ userPhone, childId, date, count, sta
 function parseIntent(text) {
   const t = (text || '').toLowerCase();
   if (/(\bplan\b|\bmy\s+plan\b)/.test(t)) return { intent: 'PLAN' };
+  if (/(\binvite\b|\badd\s+parent\b|\badd\s+therapist\b)/.test(t)) return { intent: 'INVITE_MEMBER' };
   if (/(\bexport\b.*\bdata\b|\bdata\s*export\b)/.test(t)) return { intent: 'EXPORT_DATA' };
   if (/(\bdelete\b.*\bdata\b|\berase\b.*\bdata\b)/.test(t)) return { intent: 'DELETE_DATA' };
   if (/(\bmembers\b|\bteam\b)/.test(t)) return { intent: 'MEMBERS' };

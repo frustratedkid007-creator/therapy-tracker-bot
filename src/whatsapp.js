@@ -209,14 +209,15 @@ async function sendMoreMenu(to) {
               { id: 'weekly', title: 'Weekly insights' },
               { id: 'summary', title: 'Monthly summary' },
               { id: 'download_report', title: 'Download report PDF' },
+              { id: 'feedback_note', title: 'Therapy notes (voice)' },
               { id: 'undo', title: 'Undo last log' },
-              { id: 'backfill_attended', title: 'Backfill attended' },
-              { id: 'backfill_missed', title: 'Backfill missed' }
+              { id: 'backfill_attended', title: 'Backfill attended' }
             ]},
             { title: 'Account', rows: [
               { id: 'setup_other', title: 'Update configuration' },
               { id: 'plan_status', title: 'Plan status' },
-              { id: 'go_pro', title: 'Upgrade plan' }
+              { id: 'go_pro', title: 'Upgrade plan' },
+              { id: 'invite_member', title: 'Invite parent/therapist' }
             ]}
           ]
         }
@@ -225,12 +226,34 @@ async function sendMoreMenu(to) {
     await sendMessage(
       to,
       `🧩 More commands:\n` +
-      `holiday_range, plan_status, export_data, consent_status, members\n` +
+      `feedback, holiday_range, plan_status, export_data, consent_status, members\n` +
       `add_parent <phone>, add_therapist <phone>\n` +
       `delete_my_data`
     );
   } catch (e) {
     console.error('Error sending more menu:', e.response?.data || e.message);
+  }
+}
+
+async function sendInviteTypePicker(to) {
+  try {
+    await axios.post(`https://graph.facebook.com/v18.0/${config.PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: 'Invite as:' },
+        action: {
+          buttons: [
+            { type: 'reply', reply: { id: 'invite_parent', title: 'Parent' } },
+            { type: 'reply', reply: { id: 'invite_therapist', title: 'Therapist' } }
+          ]
+        }
+      }
+    }, { headers: { 'Authorization': `Bearer ${config.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+  } catch (error) {
+    console.error('Error sending invite picker:', error.response?.data || error.message);
   }
 }
 
@@ -667,6 +690,7 @@ module.exports = {
   sendSetupMode,
   sendYesNo,
   sendProUpsell,
+  sendInviteTypePicker,
   sendVoiceNotePrompt,
   sendMoodPicker
 };
