@@ -709,13 +709,42 @@ async function getConsentState(userPhone, tenantId) {
 }
 
 async function ensureUserExists(phone, tenantId) {
-  const { data } = await supabase
+  const targetPhone = String(phone || '').trim();
+  if (!targetPhone) return { ok: false, reason: 'invalid_phone' };
+
+  const scoped = await supabase
     .from('users')
     .select('phone')
-    .match(userMatch(tenantId, phone))
+    .match(userMatch(tenantId, targetPhone))
     .limit(1);
-  if (Array.isArray(data) && data.length) return;
-  await createUser(phone, tenantId);
+  if (Array.isArray(scoped.data) && scoped.data.length) return { ok: true };
+
+  // Fallback check by phone only for legacy/non-scoped rows.
+  const global = await supabase
+    .from('users')
+    .select('phone')
+    .eq('phone', targetPhone)
+    .limit(1);
+  if (Array.isArray(global.data) && global.data.length) return { ok: true };
+
+  const created = await createUser(targetPhone, tenantId);
+  if (!created?.ok) {
+    const retry = await supabase
+      .from('users')
+      .select('phone')
+      .eq('phone', targetPhone)
+      .limit(1);
+    if (Array.isArray(retry.data) && retry.data.length) return { ok: true };
+    return { ok: false, reason: created?.error?.message || 'create_failed' };
+  }
+
+  const verify = await supabase
+    .from('users')
+    .select('phone')
+    .eq('phone', targetPhone)
+    .limit(1);
+  if (Array.isArray(verify.data) && verify.data.length) return { ok: true };
+  return { ok: false, reason: 'verify_failed' };
 }
 
 async function handlePlanStatus(userPhone, user) {
@@ -928,7 +957,15 @@ async function handleAddMember(userPhone, tenantId, role, rawPhone) {
     return;
   }
 
-  await ensureUserExists(normalized, tenantId);
+  const ensured = await ensureUserExists(normalized, tenantId);
+  if (!ensured?.ok) {
+    await sendMessage(
+      userPhone,
+      `Could not add member yet for ${normalized}.\n` +
+      `Ask them to send "hi" once to this bot, then retry invite.`
+    );
+    return;
+  }
   const memberMatch = withTenant(tenantId, { child_id: childId, member_phone: normalized });
   const { data: existing } = await supabase
     .from('child_members')
@@ -965,7 +1002,15 @@ async function handleAddMember(userPhone, tenantId, role, rawPhone) {
   });
   const { error } = await supabase.from('child_members').insert(row);
   if (error) {
-    await sendMessage(userPhone, `Could not add member: ${error.message}`);
+    if (String(error.code) === '23503' || /child_members_member_phone_fkey|foreign key/i.test(String(error.message || ''))) {
+      await sendMessage(
+        userPhone,
+        `Could not add member yet for ${normalized}.\n` +
+        `Ask them to send "hi" once to this bot, then retry invite.`
+      );
+      return;
+    }
+    await sendMessage(userPhone, `Could not add member right now. Please retry.`);
     return;
   }
   await sendMessage(
@@ -2775,7 +2820,9 @@ async function createUser(phone, tenantId) {
   const { error } = await supabase.from('users').insert(row);
   if (error) {
     console.error('Supabase users insert error:', error.message);
+    return { ok: false, error };
   }
+  return { ok: true };
 }
 
 async function handleAttended(userPhone, user, tenantId) {
